@@ -165,6 +165,7 @@ def main() -> None:
             "/re search research agent harness citation",
             "/re papers",
             "/re cost",
+            "/re start",  # ゴール条件未確定のソフト警告
             "/re start",
             "/re approve AP-1",
             "/re eval",

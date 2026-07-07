@@ -170,6 +170,7 @@ def test_novelty_gate_allows_start_when_real_evidence_is_supported(tmp_path):
     assert session.planning_scout["novelty_status"] == "supported"
     assert session.planning_scout["blocking"] is False
 
+    discord.inject(orchestrator, "/re start")  # ゴール条件未確定のソフト警告
     started = discord.inject(orchestrator, "/re start")
     assert started.ok
     session = orchestrator.store.load()

@@ -75,6 +75,10 @@ class ResearchSession:
     last_trace_node_id: str | None = None
     accepted_ideas: list[str] = field(default_factory=list)
     rejected_ideas: list[str] = field(default_factory=list)
+    goal_criteria: list[str] = field(default_factory=list)
+    research_methods: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    start_warning_issued: bool = False
     redirects: list[str] = field(default_factory=list)
     approval_requests: dict[str, ApprovalRequest] = field(default_factory=dict)
     approvals_received: list[str] = field(default_factory=list)
@@ -147,6 +151,10 @@ class ResearchSession:
             last_trace_node_id=data.get("last_trace_node_id"),
             accepted_ideas=list(data.get("accepted_ideas", [])),
             rejected_ideas=list(data.get("rejected_ideas", [])),
+            goal_criteria=list(data.get("goal_criteria", [])),
+            research_methods=list(data.get("research_methods", [])),
+            open_questions=list(data.get("open_questions", [])),
+            start_warning_issued=bool(data.get("start_warning_issued", False)),
             redirects=list(data.get("redirects", [])),
             approval_requests=approval_requests,
             approvals_received=list(data.get("approvals_received", [])),

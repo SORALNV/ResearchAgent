@@ -12,6 +12,9 @@ def render_research_brief(session: ResearchSession) -> str:
         f"- {key}: {value}" for key, value in session.planning_answers.items()
     ) or "- 未確定"
     ideas = "\n".join(f"- {idea}" for idea in session.accepted_ideas) or "- なし"
+    goal_criteria = "\n".join(f"- {item}" for item in session.goal_criteria) or "- 未確定"
+    research_methods = "\n".join(f"- {item}" for item in session.research_methods) or "- 未確定"
+    open_questions = "\n".join(f"- {item}" for item in session.open_questions) or "- なし"
     redirects = "\n".join(f"- {item}" for item in session.redirects) or "- なし"
     approvals = "\n".join(
         f"- {item.approval_id}: {item.operation} ({item.status})"
@@ -43,6 +46,15 @@ def render_research_brief(session: ResearchSession) -> str:
 
 ## Planning Answers
 {answers}
+
+## Goal Criteria
+{goal_criteria}
+
+## Research Methods
+{research_methods}
+
+## Open Questions
+{open_questions}
 
 {scout}
 

@@ -17,7 +17,11 @@ class QueryingPlanningDialogue:
         return ["research harness agent evaluation"]
 
     def respond(self, session, user_text, purpose, image_paths=None):
-        return "## PLANNING壁打ち\nLLMが類似研究検索結果を踏まえて壁打ちします。"
+        return """## PLANNING壁打ち
+LLMが類似研究検索結果を踏まえて壁打ちします。
+
+PLAN_UPDATE:
+GOAL_CRITERIA: 研究ハーネスMVPのE2E動作を確認できたら成功"""
 
 
 def test_goal_to_start_approval_approve_stop_e2e(tmp_path):
@@ -66,6 +70,8 @@ def test_goal_to_start_approval_approve_stop_e2e(tmp_path):
     plan_text = plan_path.read_text(encoding="utf-8")
     assert "plan_model" in plan_text
     assert "research_model" in plan_text
+    assert "## Goal Criteria (何をもって完了/成功とみなすか)" in plan_text
+    assert "研究ハーネスMVPのE2E動作を確認できたら成功" in plan_text
 
     continued_result = discord.inject(orchestrator, "/re approve AP-1")
     continued = continued_result.message
@@ -126,6 +132,29 @@ def test_start_is_blocked_before_goal(tmp_path):
         raise AssertionError("start without /goal should fail")
 
 
+def test_start_soft_blocks_once_without_goal_criteria(tmp_path):
+    orchestrator, discord, _ = make_orchestrator(tmp_path)
+    discord.inject(orchestrator, "/re new")
+    discord.inject(orchestrator, "/re plan")
+    discord.inject_message(orchestrator, "soft gate path")
+
+    first_result = discord.inject(orchestrator, "/re start")
+
+    assert first_result.ok
+    assert first_result.mode == "PLANNING"
+    assert "ゴール条件" in first_result.message
+    session = orchestrator.store.load()
+    assert session.start_warning_issued
+    assert session.mode == Mode.PLANNING
+
+    second_result = discord.inject(orchestrator, "/re start")
+
+    assert second_result.ok
+    assert second_result.mode == "APPROVAL_BLOCKED"
+    session = orchestrator.store.load()
+    assert session.mode == Mode.APPROVAL_BLOCKED
+
+
 def test_re_new_finishes_previous_session_and_creates_next(tmp_path):
     orchestrator, discord, _ = make_orchestrator(tmp_path)
     discord.inject(orchestrator, "/re new", user_id="sora", channel_id="lab")
@@ -156,6 +185,7 @@ def test_research_reject_path_through_fake_discord(tmp_path):
 
     discord.inject_message(orchestrator, "reject path")
     discord.inject(orchestrator, "/re accept PG-1")
+    discord.inject(orchestrator, "/re start")  # ゴール条件未確定のソフト警告
     discord.inject(orchestrator, "/re start")
     rejected = discord.inject(orchestrator, "/re reject AP-1 許可しない")
     assert rejected.ok

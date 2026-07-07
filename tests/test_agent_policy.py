@@ -101,6 +101,7 @@ def test_long_running_operation_reports_to_important_channel_without_blocking(tm
 
     discord.inject_message(orchestrator, "notice policy")
     discord.inject(orchestrator, "/re accept PG-1")
+    discord.inject(orchestrator, "/re start")  # ゴール条件未確定のソフト警告
     result = discord.inject(orchestrator, "/re start")
     assert result.ok
     session = orchestrator.store.load()
@@ -145,6 +146,7 @@ def test_sudo_operation_can_be_approved_from_discord_command(tmp_path):
 
     discord.inject_message(orchestrator, "sudo policy")
     discord.inject(orchestrator, "/re accept PG-1")
+    discord.inject(orchestrator, "/re start")  # ゴール条件未確定のソフト警告
     blocked = discord.inject(orchestrator, "/re start")
     assert blocked.ok
     session = orchestrator.store.load()

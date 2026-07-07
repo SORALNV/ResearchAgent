@@ -35,6 +35,7 @@ def test_reject_returns_to_planning(tmp_path):
     orchestrator, _ = make_orchestrator(tmp_path)
     orchestrator.goal("承認却下を検証する")
     orchestrator.accept_phase_gate("PG-1")
+    orchestrator.start()  # ゴール条件未確定のソフト警告
     orchestrator.start()
     rejected = orchestrator.reject("AP-1", "削除系操作はまだ許可しない")
     assert "モード: PLANNING" in rejected

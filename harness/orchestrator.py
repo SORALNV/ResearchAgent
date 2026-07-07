@@ -16,7 +16,7 @@ from harness.ledger import ResearchLedger
 from harness.modes import Mode
 from harness.paper_search import ArxivPaperSearchProvider, FakePaperSearchProvider, PaperSearchProvider
 from harness.papers import Paper, PaperStore
-from harness.planning_dialogue import PlanningDialogueRunner
+from harness.planning_dialogue import PlanningDialogueRunner, parse_plan_update
 from harness.planning import build_planning_scout, generate_planning_query, render_planning_scout
 from harness.reporting import render_report, render_run_summary, review_report
 from harness.research_brief import ResearchBriefWriter, render_research_brief
@@ -284,6 +284,25 @@ class ResearchOrchestrator:
             return self._block_for_phase_gate(session)
         if session.planning_scout.get("blocking") and not self._has_accepted_phase_gate(session, "literature_review"):
             return self._block_for_novelty_gate(session)
+        if not session.goal_criteria and not session.start_warning_issued:
+            session.start_warning_issued = True
+            session.next_action = "ゴール条件を確認する。開始するなら再度 /re start"
+            self.store.save(session)
+            brief = self._brief_writer(session).write(session)
+            message = (
+                "⚠️ ゴール条件（何をもって完了/成功とみなすか）がまだ確定していません。"
+                "壁打ちで『ゴール条件は◯◯にしよう』のように合意すると記録されます。"
+                "このまま開始する場合はもう一度 /re start を送ってください。"
+            )
+            self._record(
+                session,
+                event_type="start_soft_blocked",
+                decision="goal_criteria_missing",
+                confidence="high",
+                research_brief_snapshot=brief,
+                discord_report=message,
+            )
+            return message
         plan_path = self._write_plan_md(session)
         session.transition_to(Mode.RESEARCH)
         session.phase = "research"
@@ -375,16 +394,28 @@ class ResearchOrchestrator:
             purpose="Soraとの継続壁打ち。単一LLMで解決せず、テーマ、比較対象、差分、成果物、次に使う役割やツールを具体化する。",
             image_paths=attachments,
         )
-        response = dialogue + self._format_auto_search_summary(session, scout_reports)
-        session.accepted_ideas.append(f"PLANNING dialogue: {dialogue[:500]}")
+        display_text, plan_updates = parse_plan_update(dialogue)
+        update_summary = self._apply_plan_update(session, plan_updates)
+        response = display_text + self._format_auto_search_summary(session, scout_reports)
+        if update_summary:
+            response = response.rstrip() + f"\n\n📌 プラン更新: {update_summary}"
+        session.accepted_ideas.append(f"PLANNING dialogue: {display_text[:500]}")
         session.next_action = "通常メッセージで継続し、方針が固まったら /re start"
         self.store.save(session)
         brief = self._brief_writer(session).write(session)
+        if update_summary:
+            self._record(
+                session,
+                event_type="plan_structure_updated",
+                decision=update_summary,
+                confidence="high",
+                research_brief_snapshot=brief,
+            )
         self._record(
             session,
             event_type="planning_dialogue_completed",
             user_instruction=text,
-            main_agent_summary=dialogue,
+            main_agent_summary=display_text,
             decision="Soraの返答待ち",
             confidence="mid",
             research_brief_snapshot=brief,
@@ -1085,6 +1116,9 @@ class ResearchOrchestrator:
         scout = session.planning_scout or {}
         primary = scout.get("primary_comparison") or {}
         accepted = "\n".join(f"- {item}" for item in session.accepted_ideas[-12:]) or "- なし"
+        goal_criteria = "\n".join(f"- {item}" for item in session.goal_criteria) or "- 未確定"
+        research_methods = "\n".join(f"- {item}" for item in session.research_methods) or "- 未確定"
+        open_questions = "\n".join(f"- {item}" for item in session.open_questions) or "- なし"
         redirects = "\n".join(f"- {item}" for item in session.redirects) or "- なし"
         return f"""# Research Plan
 
@@ -1110,6 +1144,15 @@ class ResearchOrchestrator:
 
 ## Conversation Notes
 {accepted}
+
+## Goal Criteria (何をもって完了/成功とみなすか)
+{goal_criteria}
+
+## Research Methods
+{research_methods}
+
+## Open Questions
+{open_questions}
 
 ## Redirects And Constraints
 {redirects}
@@ -1282,6 +1325,44 @@ class ResearchOrchestrator:
             gate.phase == phase and gate.status == "accepted"
             for gate in session.phase_gates.values()
         )
+
+    def _apply_plan_update(self, session: ResearchSession, updates: dict[str, list[str]]) -> str:
+        if not updates:
+            return ""
+        counts = {
+            "ゴール条件": 0,
+            "方法": 0,
+            "確認事項": 0,
+            "解決": 0,
+        }
+        for item in updates.get("goal_criteria", []):
+            if item not in session.goal_criteria:
+                session.goal_criteria.append(item)
+                counts["ゴール条件"] += 1
+        for item in updates.get("research_methods", []):
+            if item not in session.research_methods:
+                session.research_methods.append(item)
+                counts["方法"] += 1
+        for item in updates.get("open_questions", []):
+            if item not in session.open_questions:
+                session.open_questions.append(item)
+                counts["確認事項"] += 1
+        for resolved in updates.get("resolved_questions", []):
+            before = len(session.open_questions)
+            session.open_questions = [
+                item
+                for item in session.open_questions
+                if not (item == resolved or item.startswith(resolved) or resolved.startswith(item))
+            ]
+            counts["解決"] += before - len(session.open_questions)
+        labels = [
+            f"{label}+{count}"
+            for label, count in counts.items()
+            if count > 0 and label != "解決"
+        ]
+        if counts["解決"] > 0:
+            labels.append(f"確認事項-{counts['解決']}")
+        return ", ".join(labels)
 
 
 def _format_paper_line(paper: Paper) -> str:

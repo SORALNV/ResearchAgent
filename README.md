@@ -175,6 +175,8 @@ normal Discord messages for the research idea and PLANNING dialogue
 
 During dialogue mode, the main planning agent should behave like an orchestrator-facing conversation partner. It may decide to use the paper-search tool, propose sub/review/fresh consultation, or ask Sora to clarify constraints. The harness records the dialogue, evidence, decisions, and next actions; it should not treat one LLM response as the final research answer.
 
+When the planning agent and Sora agree on concrete goal criteria, research methods, or open clarification questions, the agent records them as structured plan fields. These fields are written to `research_brief.md` and the final `plan.md`, so `/re start` hands off more than raw dialogue notes.
+
 The Discord bot presence shows the current user-facing mode:
 
 - `Neutral`: no active planning conversation, finished session, or waiting for `/re plan`
@@ -186,7 +188,7 @@ The Discord bot presence shows the current user-facing mode:
 After `/re plan`, ordinary Discord messages in the important channel continue the PLANNING wall-ball conversation. On each turn, the LLM may decide to call the paper-search tool and must generate the search query itself. This is the intended place to decide the concrete theme, primary comparison, differentiation point, and first deliverable before `/re start`.
 Image attachments posted during `plan` mode are saved under `artifacts/attachments/` and passed to the PLAN model.
 
-`/re start` moves the session to `RESEARCH` and runs `MockAgentRunner`. The first round proposes a dangerous dry-run operation so the approval gate can be tested. The harness switches to `APPROVAL_BLOCKED`, reports an `@Sora` approval request, and waits for `/re approve AP-1` or `/re reject AP-1 <reason>`.
+`/re start` moves the session to `RESEARCH` and runs `MockAgentRunner`. If no goal criteria have been confirmed yet, the first `/re start` warns and stays in `PLANNING`; sending `/re start` again proceeds anyway. The first research round proposes a dangerous dry-run operation so the approval gate can be tested. The harness switches to `APPROVAL_BLOCKED`, reports an `@Sora` approval request, and waits for `/re approve AP-1` or `/re reject AP-1 <reason>`.
 
 If the internal novelty gate has produced a blocking result, `/re start` stays in `PLANNING` and posts an important-channel phase-gate decision request instead of entering `RESEARCH`. Use `/re accept PG-1` to proceed despite the risk, or `/re revise PG-1 <reason>` to keep planning and record the revision reason.
 
@@ -207,6 +209,8 @@ If the internal novelty gate has produced a blocking result, `/re start` stays i
 - writes the result into `research_brief.md`
 
 Use the scout output to decide whether the research should be a reproduction, comparison, implementation prototype, new evaluation, or a narrower investigation. Do not claim novelty without a source-backed comparison; mark uncertain points as `未確認` or `要検証`.
+
+The planning dialogue can also emit a `PLAN_UPDATE` block to append agreed goal criteria, methods, and open questions, or resolve previously open questions. The block is stripped from the Discord-facing reply and kept as structured session state.
 
 Fake-provider results are useful for tests, but they are not treated as real literature evidence. If only fake papers are available, the novelty gate returns `needs_human_decision`.
 

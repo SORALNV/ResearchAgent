@@ -4,7 +4,7 @@ from harness.discord_adapter import FakeDiscordAdapter, bot_display_mode
 from harness.modes import Mode
 from harness.command_parser import parse_research_command
 from harness.orchestrator import ResearchOrchestrator
-from harness.planning_dialogue import PlanningDialogueRunner
+from harness.planning_dialogue import PlanningDialogueRunner, parse_plan_update
 from harness.state import ResearchSession
 
 
@@ -14,6 +14,22 @@ class StaticPlanningDialogue:
 
     def respond(self, session, user_text: str, purpose: str, image_paths=None) -> str:
         return "短い壁打ち返答です。"
+
+
+class StructuredPlanningDialogue:
+    def propose_search_queries(self, session, user_text: str, purpose: str) -> list[str]:
+        return []
+
+    def respond(self, session, user_text: str, purpose: str, image_paths=None) -> str:
+        return """ここは表示される壁打ち本文です。
+
+PLAN_UPDATE:
+GOAL_CRITERIA: 比較表と最小プロトタイプで有効性を確認できたら成功
+METHOD: 既存研究との差分表を作る
+OPEN_QUESTION: 評価対象データセットを何にするか
+OPEN_QUESTION: 成果物をどこまで実装するか
+RESOLVED_QUESTION: 成果物をどこまで実装するか
+"""
 
 
 def test_single_command_entrypoint_tracks_context(tmp_path):
@@ -88,6 +104,41 @@ REASON: 類似研究確認が必要
     ]
 
 
+def test_parse_plan_update_no_block():
+    display, updates = parse_plan_update("普通の返答です。")
+    assert display == "普通の返答です。"
+    assert updates == {}
+
+
+def test_parse_plan_update_extracts_multiple_lines():
+    display, updates = parse_plan_update(
+        """本文です。
+
+PLAN_UPDATE:
+GOAL_CRITERIA: レポートが完成している
+GOAL_CRITERIA: 再現手順がある
+METHOD: 論文比較
+OPEN_QUESTION: 評価軸は何か
+RESOLVED_QUESTION: 古い確認事項
+"""
+    )
+    assert display == "本文です。"
+    assert updates == {
+        "goal_criteria": ["レポートが完成している", "再現手順がある"],
+        "research_methods": ["論文比較"],
+        "open_questions": ["評価軸は何か"],
+        "resolved_questions": ["古い確認事項"],
+    }
+
+
+def test_parse_plan_update_ignores_body_before_block():
+    display, updates = parse_plan_update(
+        "本文中の GOAL_CRITERIA: これはただの会話\nPLAN_UPDATE:\nMETHOD: 実験ログを残す"
+    )
+    assert "GOAL_CRITERIA" in display
+    assert updates == {"research_methods": ["実験ログを残す"]}
+
+
 def test_planning_dialogue_codex_command_matches_current_cli(tmp_path):
     config = HarnessConfig(project_root=tmp_path, sub_agent_command="codex")
     runner = PlanningDialogueRunner(config)
@@ -146,3 +197,31 @@ def test_fake_plan_message_is_not_duplicated(tmp_path):
 
     new_messages = discord.important_messages[before:]
     assert new_messages == ["短い壁打ち返答です。"]
+
+
+def test_discuss_applies_plan_update_and_strips_block(tmp_path):
+    discord = FakeDiscordAdapter()
+    orchestrator = ResearchOrchestrator(
+        config=HarnessConfig(project_root=tmp_path, paper_provider="fake"),
+        discord=discord,
+    )
+    orchestrator.planning_dialogue = StructuredPlanningDialogue()
+    orchestrator.handle(Command("new_session"))
+    orchestrator.handle(Command("enter_plan"))
+
+    result = discord.inject_message(orchestrator, "ゴール条件と方法を決めたい")
+
+    assert result.ok
+    assert "PLAN_UPDATE" not in result.message
+    assert "📌 プラン更新: ゴール条件+1, 方法+1, 確認事項+2, 確認事項-1" in result.message
+    session = orchestrator.store.load()
+    assert session.goal_criteria == ["比較表と最小プロトタイプで有効性を確認できたら成功"]
+    assert session.research_methods == ["既存研究との差分表を作る"]
+    assert session.open_questions == ["評価対象データセットを何にするか"]
+    assert any("PLAN_UPDATE" not in item for item in session.accepted_ideas)
+    journal = (
+        orchestrator.config.journal_path(session.session_id)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    assert any("plan_structure_updated" in line for line in journal)

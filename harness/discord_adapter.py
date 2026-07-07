@@ -357,7 +357,17 @@ def _context_from_interaction(interaction) -> CommandContext:
 def _chunks(message: str, max_length: int) -> list[str]:
     if len(message) <= max_length:
         return [message]
-    return [message[index : index + max_length] for index in range(0, len(message), max_length)]
+    chunks: list[str] = []
+    rest = message
+    while len(rest) > max_length:
+        cut = rest.rfind("\n", 1, max_length)
+        if cut < max_length // 2:
+            cut = max_length
+        chunks.append(rest[:cut].rstrip("\n"))
+        rest = rest[cut:].lstrip("\n")
+    if rest:
+        chunks.append(rest)
+    return chunks
 
 
 def _drain_log_batch(

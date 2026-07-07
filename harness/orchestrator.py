@@ -180,7 +180,7 @@ class ResearchOrchestrator:
         previous = self.store.load()
         previous_summary = ""
         if previous and previous.mode != Mode.DONE:
-            previous_summary = self.stop()
+            previous_summary = self.stop(quiet=True)
         session = ResearchSession.new("未設定")
         session.current_question = "新しい研究テーマの提案待ち"
         session.next_action = "/re plan でplanモードに切り替える"
@@ -516,7 +516,7 @@ class ResearchOrchestrator:
         self._save_journal_and_brief(session, f"{approval_id} rejected", user_instruction=reason)
         return self.status()
 
-    def stop(self) -> str:
+    def stop(self, quiet: bool = False) -> str:
         session = self._require_session()
         if session.mode != Mode.DONE:
             session.transition_to(Mode.DONE)
@@ -565,7 +565,8 @@ class ResearchOrchestrator:
         run_summary = render_run_summary(session, papers, ledger_entries)
         self.config.run_summary_path(session.session_id).write_text(run_summary + "\n", encoding="utf-8")
         report_files_changed.append(str(self.config.run_summary_path(session.session_id)))
-        self.discord.send(report, channel="important")
+        if not quiet:
+            self.discord.send(report, channel="important")
         self.store.save(session)
         self._record(
             session,
@@ -823,7 +824,7 @@ class ResearchOrchestrator:
         )
         if send_discord:
             self.discord.send(report, channel="important")
-        self._record(session, event_type="discord_report_sent", discord_report=report)
+            self._record(session, event_type="discord_report_sent", discord_report=report)
         return report
 
     def list_papers(self) -> str:

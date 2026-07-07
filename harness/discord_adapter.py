@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 from harness.command_parser import parse_research_command
@@ -70,14 +71,23 @@ class FakeDiscordAdapter:
             self.send(result.message, channel="important")
         return result
 
-    def inject_message(self, orchestrator, content: str, user_id: str = "sora", channel_id: str = "fake-channel"):
+    def inject_message(
+        self,
+        orchestrator,
+        content: str,
+        user_id: str = "sora",
+        channel_id: str = "fake-channel",
+        attachments: list[str] | None = None,
+    ):
         event = FakeDiscordEvent(content=content, user_id=user_id, channel_id=channel_id)
         self.input_events.append(event)
+        before_count = len(self.important_messages)
         result = orchestrator.handle(
-            Command("plan_text", {"text": content}),
+            Command("plan_text", {"text": content, "attachments": attachments or []}),
             CommandContext(actor=user_id, source="fake-discord-message", correlation_id=event.timestamp),
         )
-        self.send(result.message, channel="important")
+        if len(self.important_messages) == before_count:
+            self.send(result.message, channel="important")
         return result
 
 
@@ -91,11 +101,14 @@ class DiscordChannelAdapter:
         self.client = client
         self.important_channel_id = int(important_channel_id) if important_channel_id else None
         self.log_channel_id = int(log_channel_id) if log_channel_id else None
+        self.important_sent_count = 0
 
     def send(self, message: str, channel: str = "important") -> None:
         channel_id = self.log_channel_id if channel == "log" else self.important_channel_id
         if channel_id is None:
             return
+        if channel != "log":
+            self.important_sent_count += 1
         try:
             loop = self.client.loop
             loop.create_task(self._send(channel_id, message))
@@ -160,14 +173,18 @@ class DiscordBotAdapter:
             await interaction.response.defer(thinking=True)
             if command.name == "stop":
                 await _sync_presence("finalizing")
+            before_important = output_adapter.important_sent_count
             result = orchestrator.handle(command, _context_from_interaction(interaction))
-            await _reply(interaction, result.message)
+            if output_adapter.important_sent_count == before_important:
+                await _reply(interaction, result.message)
+            else:
+                await _reply(interaction, "完了しました。")
             await _sync_presence()
 
         async def _sync_presence(override_mode: str | None = None) -> None:
             display_mode = override_mode or bot_display_mode(orchestrator.store.load())
             status = {
-                "Neutral": discord.Status.idle,
+                "Neutral": discord.Status.online,
                 "plan": discord.Status.online,
                 "researching": discord.Status.online,
                 "blocked": discord.Status.dnd,
@@ -175,7 +192,7 @@ class DiscordBotAdapter:
             }.get(display_mode, discord.Status.online)
             await client.change_presence(
                 status=status,
-                activity=discord.Game(name=f"mode: {display_mode}"),
+                activity=discord.Game(name=display_mode),
             )
 
         re = app_commands.Group(name="re", description="研究モード操作")
@@ -263,17 +280,26 @@ class DiscordBotAdapter:
             session = orchestrator.store.load()
             if not session or session.mode.value != "PLANNING" or session.phase != "plan":
                 return
+            attachment_paths = await _save_plan_attachments(message, session)
+            before_important = output_adapter.important_sent_count
             async with message.channel.typing():
                 result = orchestrator.handle(
-                    Command("plan_text", {"text": message.content.strip()}),
+                    Command(
+                        "plan_text",
+                        {
+                            "text": message.content.strip() or "添付画像について相談したい",
+                            "attachments": attachment_paths,
+                        },
+                    ),
                     CommandContext(
                         actor=str(message.author.id),
                         source="discord-message",
                         correlation_id=str(message.id),
                     ),
                 )
-            for chunk in _chunks(result.message, 1900):
-                await message.channel.send(chunk)
+            if output_adapter.important_sent_count == before_important:
+                for chunk in _chunks(result.message, 1900):
+                    await message.channel.send(chunk)
             await _sync_presence()
 
         @client.event
@@ -297,6 +323,26 @@ def _chunks(message: str, max_length: int) -> list[str]:
     if len(message) <= max_length:
         return [message]
     return [message[index : index + max_length] for index in range(0, len(message), max_length)]
+
+
+async def _save_plan_attachments(message, session) -> list[str]:
+    saved: list[str] = []
+    if not getattr(message, "attachments", None) or not session.research_dir:
+        return saved
+    attachment_dir = Path(session.research_dir) / "artifacts" / "attachments"
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    for attachment in message.attachments:
+        filename = attachment.filename or "attachment"
+        suffix = Path(filename).suffix.lower()
+        content_type = (getattr(attachment, "content_type", None) or "").lower()
+        if suffix not in image_suffixes and not content_type.startswith("image/"):
+            continue
+        safe_name = "".join(char if char.isalnum() or char in ".-_" else "_" for char in filename)
+        path = attachment_dir / f"{message.id}_{safe_name}"
+        await attachment.save(path)
+        saved.append(str(path))
+    return saved
 
 
 def bot_display_mode(session) -> str:

@@ -84,7 +84,11 @@ def build_planning_scout(goal: str, query: str, papers: list[Paper]) -> dict[str
         {
             "paper_id": paper.paper_id,
             "title": paper.title,
+            "authors": paper.authors[:4],
             "year": paper.year,
+            "venue": paper.venue,
+            "url": paper.url,
+            "abstract_excerpt": _excerpt(paper.abstract, 700),
             "summary": paper.summary,
             "confidence": paper.confidence,
             "source": paper.source,
@@ -226,8 +230,19 @@ def render_planning_scout(scout: dict[str, Any]) -> str:
     if similar:
         for item in similar:
             source_kind = item.get("source_kind") or ("fake" if item.get("source") == "fake" else "real")
-            lines.append(
-                f"- [{item['paper_id']}] {item['title']} ({item.get('year') or '未確認'}, {source_kind}): {item.get('summary') or '要約なし'}"
+            authors = ", ".join(item.get("authors") or []) or "未確認"
+            lines.extend(
+                [
+                    f"- [{item['paper_id']}] {item['title']} ({item.get('year') or '未確認'}, {source_kind})",
+                    f"  - authors: {authors}",
+                    f"  - venue/source: {item.get('venue') or item.get('source') or '未確認'}",
+                    f"  - url: {item.get('url') or '未確認'}",
+                    f"  - relevance/confidence: {item.get('relevance_score', 0):.2f} / {item.get('confidence') or '未確認'}",
+                    f"  - 内容要約: {item.get('summary') or '要約なし'}",
+                    f"  - abstract抜粋: {item.get('abstract_excerpt') or '未確認'}",
+                    f"  - 今回の使いどころ: 主要比較対象、評価観点、差分仮説の材料にする。断定は [{item['paper_id']}] 付きで行う。",
+                    "  - 未確認点: abstractベースのため、手法詳細・実験条件・限界は本文確認が必要。",
+                ]
             )
     else:
         lines.append("- 未確認")
@@ -260,3 +275,12 @@ def render_planning_scout(scout: dict[str, Any]) -> str:
     for item in scout.get("decision_options", []) or ["未確認"]:
         lines.append(f"- {item}")
     return "\n".join(lines)
+
+
+def _excerpt(text: str, max_chars: int) -> str:
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return "未確認"
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 1].rstrip() + "..."

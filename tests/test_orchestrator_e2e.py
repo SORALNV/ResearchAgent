@@ -16,7 +16,7 @@ class QueryingPlanningDialogue:
     def propose_search_queries(self, session, user_text, purpose):
         return ["research harness agent evaluation"]
 
-    def respond(self, session, user_text, purpose):
+    def respond(self, session, user_text, purpose, image_paths=None):
         return "## PLANNING壁打ち\nLLMが類似研究検索結果を踏まえて壁打ちします。"
 
 
@@ -52,16 +52,25 @@ def test_goal_to_start_approval_approve_stop_e2e(tmp_path):
 
     accepted_gate = discord.inject(orchestrator, "/re accept PG-1").message
     assert "acceptしました" in accepted_gate
-    first = discord.inject(orchestrator, "/re start").message
-    assert "モード: APPROVAL_BLOCKED" in first
+    first_result = discord.inject(orchestrator, "/re start")
+    first = first_result.message
+    assert first_result.mode == "APPROVAL_BLOCKED"
+    assert "モード:" not in first
     assert "@Sora AP-1" in first
     assert "承認依頼 [id: AP-1]" in first
     session = orchestrator.store.load()
     assert session.mode == Mode.APPROVAL_BLOCKED
     assert session.round_id == 1
+    plan_path = config.plan_path(session.session_id)
+    assert plan_path.exists()
+    plan_text = plan_path.read_text(encoding="utf-8")
+    assert "plan_model" in plan_text
+    assert "research_model" in plan_text
 
-    continued = discord.inject(orchestrator, "/re approve AP-1").message
-    assert "モード: DONE" in continued
+    continued_result = discord.inject(orchestrator, "/re approve AP-1")
+    continued = continued_result.message
+    assert continued_result.mode == "DONE"
+    assert "モード:" not in continued
     session = orchestrator.store.load()
     assert session.mode == Mode.DONE
     assert session.round_id == 3
@@ -69,17 +78,13 @@ def test_goal_to_start_approval_approve_stop_e2e(tmp_path):
 
     stopped = discord.inject(orchestrator, "/re stop").message
     assert "journal entries:" in stopped
-    assert "モード: DONE" in stopped
+    assert "モード:" not in stopped
     assert config.research_ledger_path(session.session_id).exists()
     assert config.report_path(session.session_id).exists()
     assert config.run_summary_path(session.session_id).exists()
     session = orchestrator.store.load()
     assert any(gate.phase == "review" and gate.status == "pending" for gate in session.phase_gates.values())
-    assert any("モード: PLANNING" in message for message in discord.messages)
-    assert any("モード: APPROVAL_BLOCKED" in message for message in discord.messages)
-    assert any("モード: RESEARCH" in message for message in discord.messages)
-    assert any("モード: DONE" in message for message in discord.messages)
-    assert any("モード: APPROVAL_BLOCKED" in message for message in discord.important_messages)
+    assert not any("モード:" in message for message in discord.important_messages)
     assert any("event_type" not in message for message in discord.important_messages)
     assert any("approval_requested" in message for message in discord.log_messages)
     assert any(message.channel == "important" for message in discord.sent_messages)

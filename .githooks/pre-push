@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCAN_SCRIPT="$REPO_ROOT/scripts/pre-push-secret-scan.sh"
+
+if [ ! -x "$SCAN_SCRIPT" ]; then
+  echo "[pre-push] scan script missing or not executable: $SCAN_SCRIPT" >&2
+  exit 1
+fi
+
+exec "$SCAN_SCRIPT" "$@"
+

@@ -6,6 +6,7 @@ from harness.agent_runner import MockAgentRunner, RoundOutput
 from harness.approval import ApprovalGate, render_approval_request
 from harness.commands import Command, CommandContext, CommandResult
 from harness.config import HarnessConfig
+from harness.config import effective_model_name
 from harness.cost import CostManager
 from harness.doctor import render_doctor, run_doctor
 from harness.discord_adapter import DiscordAdapter, FakeDiscordAdapter
@@ -48,7 +49,10 @@ class ResearchOrchestrator:
             "goal": lambda: self.goal(str(command.args["text"])),
             "new_session": self.new_session,
             "enter_plan": self.enter_plan,
-            "plan_text": lambda: self.plan_text(str(command.args["text"])),
+            "plan_text": lambda: self.plan_text(
+                str(command.args["text"]),
+                list(command.args.get("attachments", [])),
+            ),
             "plan": self.plan,
             "start": self.start,
             "status": self.status,
@@ -238,9 +242,9 @@ class ResearchOrchestrator:
             confidence="high",
             research_brief_snapshot=brief,
         )
-        return "mode: plan\n普通にテーマ案や気になる点を書いてください。"
+        return "planモードになりました。\n普通にテーマ案や気になる点を書いてください。"
 
-    def plan_text(self, text: str) -> str:
+    def plan_text(self, text: str, attachments: list[str] | None = None) -> str:
         session = self._require_session()
         if session.mode != Mode.PLANNING:
             return f"/re plan はPLANNING中だけ有効です。現在: {session.mode.value}"
@@ -257,7 +261,7 @@ class ResearchOrchestrator:
                 decision="dialogue_mode_enabled",
                 confidence="high",
             )
-        return self.discuss(text)
+        return self.discuss(text, attachments=attachments)
 
     def plan(self) -> str:
         session = self._require_session()
@@ -280,6 +284,7 @@ class ResearchOrchestrator:
             return self._block_for_phase_gate(session)
         if session.planning_scout.get("blocking") and not self._has_accepted_phase_gate(session, "literature_review"):
             return self._block_for_novelty_gate(session)
+        plan_path = self._write_plan_md(session)
         session.transition_to(Mode.RESEARCH)
         session.phase = "research"
         session.current_question = "MVPのE2E研究ループをMockAgentRunnerで通す"
@@ -291,6 +296,7 @@ class ResearchOrchestrator:
             commands_run=["/re start"],
             main_agent_summary="/start accepted",
             decision="RESEARCHへ移行",
+            files_changed=[str(plan_path)],
         )
         return self._run_until_blocked_or_done(session)
 
@@ -353,7 +359,7 @@ class ResearchOrchestrator:
         self._save_journal_and_brief(session, "idea反映", user_instruction=text)
         return f"ideaを記録しました。\n{text}"
 
-    def discuss(self, text: str) -> str:
+    def discuss(self, text: str, attachments: list[str] | None = None) -> str:
         session = self._require_session()
         if session.mode != Mode.PLANNING:
             return f"plan中の通常メッセージはPLANNING中だけ有効です。現在: {session.mode.value}"
@@ -367,6 +373,7 @@ class ResearchOrchestrator:
             session,
             user_text=text,
             purpose="Soraとの継続壁打ち。単一LLMで解決せず、テーマ、比較対象、差分、成果物、次に使う役割やツールを具体化する。",
+            image_paths=attachments,
         )
         response = dialogue + self._format_auto_search_summary(session, scout_reports)
         session.accepted_ideas.append(f"PLANNING dialogue: {dialogue[:500]}")
@@ -577,7 +584,8 @@ class ResearchOrchestrator:
         store = self._paper_store(session)
         inserted, updated = store.upsert_many(candidates)
         all_papers = store.read_all()
-        result_text = "\n".join(_format_paper_line(paper) for paper in inserted + updated)
+        changed_papers = inserted + updated
+        result_text = "\n".join(_format_paper_research_note(paper) for paper in changed_papers)
         citation_note = self._citation_note(all_papers[: min(3, len(all_papers))])
         if citation_note not in session.accepted_ideas:
             session.accepted_ideas.append(citation_note)
@@ -605,13 +613,15 @@ class ResearchOrchestrator:
         )
         if not check.ok:
             return self._block_for_cost_limit(session, check)
-        if not inserted and not updated:
+        if not changed_papers:
             return "文献候補は見つかりませんでした。未確認です。"
+        detailed_notes = "\n\n".join(_format_paper_research_note(paper) for paper in changed_papers[:5])
         report = (
             f"文献検索: {query}\n"
             f"取得: {len(candidates)} / 追加: {len(inserted)} / 統合: {len(updated)}\n"
             f"保存先: {self.config.papers_path(session.session_id)}\n"
-            f"出典付きメモ:\n{citation_note}"
+            f"\n見つかった研究の中身:\n{detailed_notes}\n\n"
+            f"出典付き短縮メモ:\n{citation_note}"
         )
         self.discord.send(report, channel="important")
         self._record(session, event_type="discord_report_sent", discord_report=report)
@@ -774,11 +784,15 @@ class ResearchOrchestrator:
             f"{paper.paper_id}: {paper.title}\n"
             f"authors: {authors}\n"
             f"year: {paper.year or '未確認'}\n"
+            f"venue: {paper.venue or '未確認'}\n"
             f"source: {paper.source}\n"
             f"url: {paper.url or '未確認'}\n"
             f"doi: {paper.doi or '未確認'}\n"
             f"arxiv_id: {paper.arxiv_id or '未確認'}\n"
             f"summary: {paper.summary}\n"
+            f"abstract: {paper.abstract or '未確認'}\n"
+            f"research_use: {_paper_research_use(paper)}\n"
+            f"unverified: abstractとメタデータベース。本文の手法詳細、実験設定、限界は未確認。\n"
             f"used_in_rounds: {paper.used_in_rounds}"
         )
 
@@ -980,7 +994,7 @@ class ResearchOrchestrator:
         fresh: str = "なし",
         approval: str = "なし",
     ) -> str:
-        lines = [f"モード: {session.mode.value}", str(result).strip()]
+        lines = [f"{self._display_mode(session)}モードになりました。", str(result).strip()]
         if fresh != "なし":
             lines.append(f"新規アイデア: {fresh}")
         if approval != "なし":
@@ -988,6 +1002,17 @@ class ResearchOrchestrator:
         elif session.next_action:
             lines.append(f"次: {session.next_action}")
         return "\n".join(line for line in lines if line)
+
+    def _display_mode(self, session: ResearchSession) -> str:
+        if session.mode == Mode.APPROVAL_BLOCKED:
+            return "blocked"
+        if session.mode == Mode.RESEARCH:
+            return "researching"
+        if session.mode == Mode.PLANNING and session.phase == "plan":
+            return "plan"
+        if session.mode == Mode.DONE:
+            return "Neutral"
+        return "Neutral"
 
     def _planning_prompt(self, session: ResearchSession) -> str:
         questions = "\n".join(f"- {item}" for item in session.planning_questions)
@@ -1044,6 +1069,55 @@ class ResearchOrchestrator:
     def _research_ledger(self, session: ResearchSession) -> ResearchLedger:
         return ResearchLedger(self.config.research_ledger_path(session.session_id))
 
+    def _write_plan_md(self, session: ResearchSession) -> Path:
+        path = self.config.plan_path(session.session_id)
+        path.write_text(self._render_plan_md(session) + "\n", encoding="utf-8")
+        self._record(
+            session,
+            event_type="plan_finalized",
+            decision="plan.md finalized for research handoff",
+            confidence="high",
+            files_changed=[str(path)],
+        )
+        return path
+
+    def _render_plan_md(self, session: ResearchSession) -> str:
+        scout = session.planning_scout or {}
+        primary = scout.get("primary_comparison") or {}
+        accepted = "\n".join(f"- {item}" for item in session.accepted_ideas[-12:]) or "- なし"
+        redirects = "\n".join(f"- {item}" for item in session.redirects) or "- なし"
+        return f"""# Research Plan
+
+## Handoff
+- plan_model: {self.config.plan_agent_model}
+- effective_plan_model: {effective_model_name(self.config.plan_agent_model)}
+- research_model: {self.config.research_agent_model}
+- effective_research_model: {effective_model_name(self.config.research_agent_model)}
+- session_id: {session.session_id}
+- version: {session.version_label}
+- research_dir: {session.research_dir}
+
+## Goal
+{session.research_goal}
+
+## Current Direction
+{session.current_question or "未設定"}
+
+## Similar Research
+- novelty_status: {scout.get("novelty_status", "未評価")}
+- primary_comparison: {primary.get("title", "未確認")} [{primary.get("paper_id", "未確認")}]
+- rationale: {scout.get("rationale", "未確認")}
+
+## Conversation Notes
+{accepted}
+
+## Redirects And Constraints
+{redirects}
+
+## Next Step For Researching
+{session.next_action or "未設定"}
+"""
+
     def _build_paper_provider(self, provider_name: str) -> PaperSearchProvider:
         if provider_name == "arxiv":
             return ArxivPaperSearchProvider()
@@ -1099,7 +1173,7 @@ class ResearchOrchestrator:
         if not papers:
             return "未確認: 出典候補がありません。"
         return "\n".join(
-            f"- {paper.summary} [{paper.paper_id}]"
+            f"- {paper.title}: {paper.summary} [{paper.paper_id}]"
             for paper in papers
         )
 
@@ -1213,6 +1287,41 @@ class ResearchOrchestrator:
 def _format_paper_line(paper: Paper) -> str:
     year = paper.year if paper.year is not None else "未確認"
     return f"{paper.paper_id} [{paper.source}] {paper.title} ({year}) score={paper.relevance_score:.2f}"
+
+
+def _format_paper_research_note(paper: Paper) -> str:
+    authors = ", ".join(paper.authors[:5]) or "未確認"
+    abstract_excerpt = _paper_excerpt(paper.abstract, 900)
+    return (
+        f"[{paper.paper_id}] {paper.title}\n"
+        f"- authors: {authors}\n"
+        f"- year/venue/source: {paper.year or '未確認'} / {paper.venue or '未確認'} / {paper.source}\n"
+        f"- url: {paper.url or '未確認'}\n"
+        f"- relevance/confidence: {paper.relevance_score:.2f} / {paper.confidence}\n"
+        f"- 内容要約: {paper.summary or '要約なし'}\n"
+        f"- abstract抜粋: {abstract_excerpt}\n"
+        f"- 今回の使いどころ: {_paper_research_use(paper)}\n"
+        f"- 未確認点: abstractとメタデータベース。本文の手法詳細、実験設定、限界、再現条件は未確認。"
+    )
+
+
+def _paper_research_use(paper: Paper) -> str:
+    title = paper.title or "この文献"
+    if paper.source == "fake":
+        return f"{title} はテスト用候補なので、実在根拠ではなく表示・保存フローの検証材料として扱う。"
+    return (
+        f"{title} を類似研究候補として、研究テーマとの重複点、差分仮説、比較すべき評価指標を決める材料にする。"
+        f"この文献に基づく主張は必ず [{paper.paper_id}] を付ける。"
+    )
+
+
+def _paper_excerpt(text: str, max_chars: int) -> str:
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return "未確認"
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 1].rstrip() + "..."
 
 
 def _format_log_entry(entry: dict[str, object]) -> str:

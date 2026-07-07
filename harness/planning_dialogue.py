@@ -4,7 +4,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from harness.config import HarnessConfig
+from harness.config import HarnessConfig, effective_model_name
 from harness.planning import render_planning_scout
 from harness.state import ResearchSession
 
@@ -13,9 +13,15 @@ class PlanningDialogueRunner:
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
 
-    def respond(self, session: ResearchSession, user_text: str, purpose: str) -> str:
+    def respond(
+        self,
+        session: ResearchSession,
+        user_text: str,
+        purpose: str,
+        image_paths: list[str] | None = None,
+    ) -> str:
         prompt = self._build_prompt(session, user_text, purpose)
-        output = self._run_llm(session, prompt)
+        output = self._run_llm(session, prompt, image_paths=image_paths)
         return output or self._fallback_response(session, user_text)
 
     def propose_search_queries(self, session: ResearchSession, user_text: str, purpose: str) -> list[str]:
@@ -56,7 +62,12 @@ class PlanningDialogueRunner:
                     queries.append(query)
         return queries
 
-    def _run_llm(self, session: ResearchSession, prompt: str) -> str:
+    def _run_llm(
+        self,
+        session: ResearchSession,
+        prompt: str,
+        image_paths: list[str] | None = None,
+    ) -> str:
         command_text = (
             self.config.main_agent_command
             or self.config.claude_agent_command
@@ -65,6 +76,13 @@ class PlanningDialogueRunner:
         if not command_text:
             return ""
         command = self._build_command(command_text, session)
+        output_path = self._last_message_path(session)
+        if output_path is not None and len(command) >= 2 and command[0].endswith("codex") and command[1] == "exec":
+            insert_at = command.index("-") if "-" in command else len(command)
+            command[insert_at:insert_at] = ["--output-last-message", str(output_path)]
+            for image_path in image_paths or []:
+                command[insert_at:insert_at] = ["--image", image_path]
+                insert_at += 2
         try:
             completed = subprocess.run(
                 command,
@@ -80,6 +98,10 @@ class PlanningDialogueRunner:
         stdout = completed.stdout.strip()
         if completed.returncode != 0:
             return ""
+        if output_path is not None and output_path.exists():
+            final = output_path.read_text(encoding="utf-8").strip()
+            if final:
+                return final
         return stdout
 
     def _build_command(self, command_text: str, session: ResearchSession) -> list[str]:
@@ -89,16 +111,26 @@ class PlanningDialogueRunner:
             return [
                 parts[0],
                 "exec",
+                "-m",
+                effective_model_name(self.config.plan_agent_model),
                 "--cd",
                 session.research_dir or str(self.config.project_root),
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
+                "--ephemeral",
+                "--color",
                 "never",
                 "-",
             ]
         return parts
+
+    def _last_message_path(self, session: ResearchSession) -> Path | None:
+        if not session.research_dir:
+            return None
+        path = Path(session.research_dir) / "artifacts" / "planning_llm_last_message.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _build_prompt(self, session: ResearchSession, user_text: str, purpose: str) -> str:
         scout = render_planning_scout(session.planning_scout) if session.planning_scout else "未実行"

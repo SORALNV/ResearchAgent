@@ -18,6 +18,7 @@ The harness records and routes work. It should avoid pretending to be the resear
 - `/re new -> PLANNING -> /re start -> RESEARCH -> /re stop` flow
 - per-research versioned folders under `research_runs/V001.0_{session_id}_{slug}/`
 - per-research `research_brief.md`, `journal.jsonl`, `papers.jsonl`, `state.json`, and `artifacts/`
+- per-research `plan.md` finalized at `/re start` for RESEARCH handoff
 - deterministic `MockAgentRunner` roles for main, sub, review, fresh, and Claude-stub consultation
 - bounded conversation sessions with `max_turns`, timeout, and stagnation stopping
 - approval gate dry-run for dangerous operations
@@ -176,13 +177,14 @@ During dialogue mode, the main planning agent should behave like an orchestrator
 
 The Discord bot presence shows the current user-facing mode:
 
-- `mode: Neutral`: no active planning conversation, finished session, or waiting for `/re plan`
-- `mode: plan`: ordinary messages are treated as PLANNING dialogue
-- `mode: researching`: research rounds are running or ready to continue
-- `mode: blocked`: approval, cost, phase gate, or safety gate is waiting for Sora
-- `mode: finalizing`: stop/summary/report cleanup is in progress
+- `Neutral`: no active planning conversation, finished session, or waiting for `/re plan`
+- `plan`: ordinary messages are treated as PLANNING dialogue
+- `researching`: research rounds are running or ready to continue
+- `blocked`: approval, cost, phase gate, or safety gate is waiting for Sora
+- `finalizing`: stop/summary/report cleanup is in progress
 
 After `/re plan`, ordinary Discord messages in the important channel continue the PLANNING wall-ball conversation. On each turn, the LLM may decide to call the paper-search tool and must generate the search query itself. This is the intended place to decide the concrete theme, primary comparison, differentiation point, and first deliverable before `/re start`.
+Image attachments posted during `plan` mode are saved under `artifacts/attachments/` and passed to the PLAN model.
 
 `/re start` moves the session to `RESEARCH` and runs `MockAgentRunner`. The first round proposes a dangerous dry-run operation so the approval gate can be tested. The harness switches to `APPROVAL_BLOCKED`, reports an `@Sora` approval request, and waits for `/re approve AP-1` or `/re reject AP-1 <reason>`.
 
@@ -254,12 +256,17 @@ Set:
 
 ```env
 SUB_AGENT_COMMAND=codex
+PLAN_AGENT_MODEL=5.4mini
+RESEARCH_AGENT_MODEL=gpt-5.5
 ```
 
-When this is set, only the `sub` role is replaced with a real CLI call. The harness runs:
+PLAN mode uses `PLAN_AGENT_MODEL` through the configured Codex command. At `/re start`, the harness writes `plan.md`; RESEARCH then uses `RESEARCH_AGENT_MODEL` and receives that plan as handoff context.
+`5.4mini` is accepted as a friendly alias and is passed to Codex CLI as `gpt-5.4-mini`.
+
+When `SUB_AGENT_COMMAND=codex` is set, only the `sub` role is replaced with a real CLI call. The harness runs:
 
 ```text
-codex exec --cd {research_dir} --skip-git-repo-check --sandbox workspace-write --ask-for-approval never -
+codex exec -m {RESEARCH_AGENT_MODEL} --cd {research_dir} --skip-git-repo-check --sandbox workspace-write --ephemeral --color never -
 ```
 
 The main/review/fresh roles remain controlled by the harness. This keeps state transitions, approval gates, journal logging, and Discord reports stable while testing one real role at a time.
@@ -469,3 +476,33 @@ Out of scope for this MVP:
 - production-grade auth and permissions
 - Web UI
 - automatic PRs, pushes, or releases
+
+## Git Hooks (push secret scan)
+
+This repository includes a `pre-push` hook that scans only the outgoing diff and blocks push if suspicious secret-like strings are found.
+
+Install once in this repo:
+
+```bash
+chmod +x scripts/install-git-hooks.sh
+./scripts/install-git-hooks.sh
+```
+
+Environment variables:
+
+- `PRE_PUSH_SCAN_MODEL` (default `5.4mini`): model name passed to AI scanner command.
+- `PRE_PUSH_SCAN_PERSONAL` (`0` or `1`, default `0`): enable phone/email-like personal information checks.
+- `PRE_PUSH_SCAN_NEW_BRANCH_COMMITS` (default `100`): number of commits to scan for a new branch push.
+- `PRE_PUSH_AI_SCAN` (`0` or `1`, default `0`): run AI scan after regex scan.
+- `PRE_PUSH_AI_SCAN_COMMAND` (required when AI scan is enabled): command that receives diff text on stdin.
+- `PRE_PUSH_AI_MODEL` (automatically set from `PRE_PUSH_SCAN_MODEL`): model name visible to AI scanner command.
+
+Example for AI scanner:
+
+```bash
+export PRE_PUSH_AI_SCAN=1
+export PRE_PUSH_SCAN_MODEL=5.4mini
+export PRE_PUSH_AI_SCAN_COMMAND='python scripts/scan_push_diff_ai.py'
+```
+
+If `PRE_PUSH_AI_SCAN=1` is set and `PRE_PUSH_AI_SCAN_COMMAND` is missing, push will fail.

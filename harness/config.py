@@ -13,6 +13,16 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
+MODEL_ALIASES = {
+    "5.3CodexSpark": "gpt-5.3-codex-spark",
+    "5.4mini": "gpt-5.4-mini",
+}
+
+
+def effective_model_name(model: str) -> str:
+    return MODEL_ALIASES.get(model, model)
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     project_root: Path
@@ -25,6 +35,8 @@ class HarnessConfig:
     review_agent_command: str | None = None
     fresh_agent_command: str | None = None
     claude_agent_command: str | None = None
+    plan_agent_model: str = "5.4mini"
+    research_agent_model: str = "gpt-5.5"
     max_rounds: int = 3
     fresh_interval: int = 2
     convergence_patience: int = 2
@@ -68,6 +80,8 @@ class HarnessConfig:
             review_agent_command=os.getenv("REVIEW_AGENT_COMMAND") or None,
             fresh_agent_command=os.getenv("FRESH_AGENT_COMMAND") or None,
             claude_agent_command=os.getenv("CLAUDE_AGENT_COMMAND") or None,
+            plan_agent_model=os.getenv("PLAN_AGENT_MODEL", "5.4mini"),
+            research_agent_model=os.getenv("RESEARCH_AGENT_MODEL", "gpt-5.5"),
             max_rounds=_int_env("MAX_ROUNDS", 3),
             fresh_interval=_int_env("FRESH_INTERVAL", 2),
             convergence_patience=_int_env("CONVERGENCE_PATIENCE", 2),
@@ -132,6 +146,9 @@ class HarnessConfig:
 
     def research_brief_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "research_brief.md"
+
+    def plan_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "plan.md"
 
     def papers_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "papers.jsonl"

@@ -4,6 +4,7 @@ from harness.agent_runner import RoundOutput, SubAgentCommandRunner
 from harness.agent_runner import parse_approval_required
 from harness.approval import ApprovalGate, ProposedOperation
 from harness.config import HarnessConfig
+from harness.config import effective_model_name
 from harness.discord_adapter import FakeDiscordAdapter
 from harness.modes import Mode
 from harness.orchestrator import ResearchOrchestrator
@@ -59,8 +60,10 @@ def test_codex_command_is_built_safely(tmp_path):
     assert str(tmp_path) in command
     assert "--sandbox" in command
     assert "workspace-write" in command
-    assert "--ask-for-approval" in command
-    assert "never" in command
+    assert "--ask-for-approval" not in command
+    assert "-m" in command
+    assert effective_model_name(config.research_agent_model) in command
+    assert "--ephemeral" in command
 
 
 class NoticeRunner:

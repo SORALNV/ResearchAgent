@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from harness.approval import ProposedOperation
-from harness.config import HarnessConfig
+from harness.config import HarnessConfig, effective_model_name
 from harness.conversation import ConversationSession
 from harness.state import ResearchSession
 
@@ -153,18 +153,23 @@ class SubAgentCommandRunner:
             return [
                 parts[0],
                 "exec",
+                "-m",
+                effective_model_name(self.config.research_agent_model),
                 "--cd",
                 session.research_dir or str(self.config.project_root),
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
-                "--ask-for-approval",
+                "--ephemeral",
+                "--color",
                 "never",
                 "-",
             ]
         return parts
 
     def _build_prompt(self, session: ResearchSession, round_number: int, task: str) -> str:
+        plan_path = self.config.plan_path(session.session_id)
+        plan_text = plan_path.read_text(encoding="utf-8") if plan_path.exists() else "plan.md未作成"
         return f"""あなたは研究ハーネスのsubエージェントです。
 単一タスクだけを実行し、結果を構造化して返してください。
 
@@ -181,6 +186,10 @@ session_id: {session.session_id}
 round: {round_number}
 goal: {session.research_goal}
 task: {task}
+plan_md_path: {plan_path}
+
+確定済みPLAN:
+{plan_text}
 """
 
 

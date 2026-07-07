@@ -1,11 +1,19 @@
 from harness.commands import Command, CommandContext
-from harness.config import HarnessConfig
+from harness.config import HarnessConfig, effective_model_name
 from harness.discord_adapter import FakeDiscordAdapter, bot_display_mode
 from harness.modes import Mode
 from harness.command_parser import parse_research_command
 from harness.orchestrator import ResearchOrchestrator
 from harness.planning_dialogue import PlanningDialogueRunner
 from harness.state import ResearchSession
+
+
+class StaticPlanningDialogue:
+    def propose_search_queries(self, session, user_text: str, purpose: str) -> list[str]:
+        return []
+
+    def respond(self, session, user_text: str, purpose: str, image_paths=None) -> str:
+        return "短い壁打ち返答です。"
 
 
 def test_single_command_entrypoint_tracks_context(tmp_path):
@@ -80,6 +88,36 @@ REASON: 類似研究確認が必要
     ]
 
 
+def test_planning_dialogue_codex_command_matches_current_cli(tmp_path):
+    config = HarnessConfig(project_root=tmp_path, sub_agent_command="codex")
+    runner = PlanningDialogueRunner(config)
+    session = ResearchSession.new("command test")
+    session.research_dir = str(tmp_path)
+    command = runner._build_command("codex", session)
+    assert "--ask-for-approval" not in command
+    assert "-m" in command
+    assert effective_model_name(config.plan_agent_model) in command
+    assert "--sandbox" in command
+    assert "--ephemeral" in command
+    assert command[-1] == "-"
+
+
+def test_planning_dialogue_adds_images_to_codex_command(tmp_path):
+    config = HarnessConfig(project_root=tmp_path, sub_agent_command="codex")
+    runner = PlanningDialogueRunner(config)
+    session = ResearchSession.new("image command test")
+    session.research_dir = str(tmp_path)
+    command = runner._build_command("codex", session)
+    output_path = runner._last_message_path(session)
+    insert_at = command.index("-")
+    command[insert_at:insert_at] = ["--output-last-message", str(output_path)]
+    for image_path in [str(tmp_path / "sample.png")]:
+        command[insert_at:insert_at] = ["--image", image_path]
+        insert_at += 2
+    assert "--image" in command
+    assert str(tmp_path / "sample.png") in command
+
+
 def test_bot_display_mode_mapping():
     assert bot_display_mode(None) == "Neutral"
     session = ResearchSession.new("mode test")
@@ -91,3 +129,20 @@ def test_bot_display_mode_mapping():
     assert bot_display_mode(session) == "blocked"
     session.mode = Mode.DONE
     assert bot_display_mode(session) == "Neutral"
+
+
+def test_fake_plan_message_is_not_duplicated(tmp_path):
+    discord = FakeDiscordAdapter()
+    orchestrator = ResearchOrchestrator(
+        config=HarnessConfig(project_root=tmp_path, paper_provider="fake"),
+        discord=discord,
+    )
+    orchestrator.planning_dialogue = StaticPlanningDialogue()
+    orchestrator.handle(Command("new_session"))
+    orchestrator.handle(Command("enter_plan"))
+    before = len(discord.important_messages)
+
+    discord.inject_message(orchestrator, "テーマを詰めたいです")
+
+    new_messages = discord.important_messages[before:]
+    assert new_messages == ["短い壁打ち返答です。"]

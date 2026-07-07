@@ -541,22 +541,42 @@ class ResearchOrchestrator:
             ledger_entries,
             model_or_command=self.config.sub_agent_command or "mock",
         )
-        report_review = review_report(generated_report, papers, session)
+        report_path = self.config.report_path(session.session_id)
+        harness_report_path = report_path.parent / "harness_report.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_report = report_path.read_text(encoding="utf-8") if report_path.exists() else ""
+        report_files_changed: list[str]
+        if existing_report.strip():
+            final_report = existing_report
+            harness_report_path.write_text(generated_report + "\n", encoding="utf-8")
+            report_files_changed = [str(harness_report_path)]
+            self._record(
+                session,
+                event_type="report_preserved",
+                decision="existing report.md preserved; harness_report.md generated",
+                confidence="high",
+                files_changed=[str(harness_report_path)],
+            )
+        else:
+            final_report = generated_report
+            report_path.write_text(generated_report + "\n", encoding="utf-8")
+            report_files_changed = [str(report_path)]
+        report_review = review_report(final_report, papers, session, report_path=report_path)
         run_summary = render_run_summary(session, papers, ledger_entries)
-        self.config.report_path(session.session_id).parent.mkdir(parents=True, exist_ok=True)
-        self.config.report_path(session.session_id).write_text(generated_report + "\n", encoding="utf-8")
         self.config.run_summary_path(session.session_id).write_text(run_summary + "\n", encoding="utf-8")
+        report_files_changed.append(str(self.config.run_summary_path(session.session_id)))
         self.discord.send(report, channel="important")
         self.store.save(session)
         self._record(
             session,
             event_type="report_generated",
-            decision="report.md generated",
+            decision=(
+                "report.md preserved; harness_report.md generated"
+                if existing_report.strip()
+                else "report.md generated"
+            ),
             confidence="high",
-            files_changed=[
-                str(self.config.report_path(session.session_id)),
-                str(self.config.run_summary_path(session.session_id)),
-            ],
+            files_changed=report_files_changed,
         )
         self._record(
             session,

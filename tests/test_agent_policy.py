@@ -1,6 +1,6 @@
 import sys
 
-from harness.agent_runner import RoundOutput, SubAgentCommandRunner
+from harness.agent_runner import MockAgentRunner, RoundOutput, SubAgentCommandRunner
 from harness.agent_runner import parse_approval_required
 from harness.approval import ApprovalGate, ProposedOperation
 from harness.config import HarnessConfig
@@ -48,6 +48,43 @@ def test_sub_agent_command_runner_uses_generic_command_and_counts_call(tmp_path)
     assert "sub-ok" in output
     assert "True" in output
     assert session.cost.agent_calls == 1
+
+
+def test_real_sub_agent_round_does_not_create_dummy_danger_operation(tmp_path):
+    session = ResearchSession.new("real research")
+    session.research_dir = str(tmp_path)
+    config = HarnessConfig(
+        project_root=tmp_path,
+        sub_agent_command=f"{sys.executable} -c \"import sys; data=sys.stdin.read(); print('real-sub'); print('round1_notes.md' in data)\"",
+        max_command_seconds=10,
+        max_rounds=2,
+    )
+    output = MockAgentRunner(config).run_round(session)
+    assert output.proposed_operation is None
+    assert output.claude_consultation is None
+    assert "delete_file: /tmp/research-harness-dangerous-demo.txt" not in output.sub_agent_output
+    assert "Claude stub" not in output.main_agent_summary
+    assert "real-sub" in output.sub_agent_output
+    assert "True" in output.sub_agent_output
+    assert output.next_action == "次ラウンドで続きを進める"
+
+
+def test_build_round_task_has_three_stages(tmp_path):
+    session = ResearchSession.new("staged research")
+    real_runner = MockAgentRunner(HarnessConfig(project_root=tmp_path, sub_agent_command="codex"))
+    first = real_runner._build_round_task(session, round_number=1, max_rounds=3)
+    middle = real_runner._build_round_task(session, round_number=2, max_rounds=3)
+    final = real_runner._build_round_task(session, round_number=3, max_rounds=3)
+    assert "調査・実験準備" in first
+    assert "artifacts/round1_notes.md" in first
+    assert "前ラウンドの成果物と課題" in middle
+    assert "artifacts/round2_notes.md" in middle
+    assert "図・グラフを含む最終レポート" in final
+    assert "artifacts/report.md" in final
+
+    mock_runner = MockAgentRunner(HarnessConfig(project_root=tmp_path))
+    mock = mock_runner._build_round_task(session, round_number=1, max_rounds=3)
+    assert mock == f"Mock sub-agent: {mock_runner.prompts['sub']}"
 
 
 def test_codex_command_is_built_safely(tmp_path):

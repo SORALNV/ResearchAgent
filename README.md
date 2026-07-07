@@ -235,7 +235,9 @@ On `/re stop`, the harness writes:
 - `artifacts/report.md`
 - `run_summary.md`
 
-The report includes sources, novelty status, ledger summary, unverified claims, risks, next steps, and AI provenance. A deterministic report review records warnings in `journal.jsonl` as `report_review_completed`.
+If the research sub agent already wrote a non-empty `artifacts/report.md` (the final research round asks it to write a figure-rich markdown report there), `/re stop` preserves it and writes the deterministic harness report to `artifacts/harness_report.md` instead, recording a `report_preserved` event.
+
+The report includes sources, novelty status, ledger summary, unverified claims, risks, next steps, and AI provenance. A deterministic report review records warnings in `journal.jsonl` as `report_review_completed`, including warnings for `![...](path)` image links whose files do not exist.
 
 If the deterministic review finds warnings, the harness creates a `review` phase gate such as `PG-2`. Experiment/SubAgent execution does not create phase gates; long-running or dangerous operations are still handled by the existing important notice and approval policies.
 
@@ -274,6 +276,13 @@ codex exec -m {RESEARCH_AGENT_MODEL} --cd {research_dir} --skip-git-repo-check -
 ```
 
 The main/review/fresh roles remain controlled by the harness. This keeps state transitions, approval gates, journal logging, and Discord reports stable while testing one real role at a time.
+
+When `SUB_AGENT_COMMAND` is set, research rounds run in real mode:
+
+- the round-1 dummy dangerous-operation demo and Claude stub are disabled
+- round tasks are staged: round 1 prepares data/code per `plan.md` (`artifacts/round1_notes.md`), middle rounds run experiments/analysis (`artifacts/roundN_notes.md`), and the final round writes a figure-rich markdown report to `artifacts/report.md`
+- the sub prompt asks for matplotlib figures under `artifacts/figures/*.png` (markdown tables or mermaid as fallback), `[P-xxx]` citations for paper-backed claims, and lists existing `artifacts/` files plus `papers.jsonl` for continuity
+- real research rounds can take longer than the 300s default; set `MAX_COMMAND_SECONDS=1800` in `.env` for real runs
 
 If a real sub-agent needs a dangerous operation such as `sudo`, `chmod`, `chown`, deletion, external posting, or `git push`, it must not execute it directly. It should report one line:
 

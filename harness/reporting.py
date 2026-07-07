@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict
+from pathlib import Path
 
 from harness.ledger import LedgerEntry
 from harness.papers import Paper
@@ -88,7 +89,13 @@ def render_run_summary(session: ResearchSession, papers: list[Paper], ledger_ent
     )
 
 
-def review_report(report: str, papers: list[Paper], session: ResearchSession) -> dict[str, object]:
+def review_report(
+    report: str,
+    papers: list[Paper],
+    session: ResearchSession,
+    research_dir: str | Path | None = None,
+    report_path: str | Path | None = None,
+) -> dict[str, object]:
     valid_ids = {paper.paper_id for paper in papers}
     cited_ids = set(re.findall(r"\[(P-\d{3})\]", report))
     invalid = sorted(cited_ids - valid_ids)
@@ -101,12 +108,48 @@ def review_report(report: str, papers: list[Paper], session: ResearchSession) ->
         warnings.append(f"存在しないpaper_idを参照しています: {', '.join(invalid)}")
     if "未確認" not in report and session.planning_scout.get("novelty_status") != "supported":
         warnings.append("未確認事項の明示が不足している可能性があります。")
+    missing_images = _missing_image_links(report, research_dir=research_dir, report_path=report_path)
+    for image_path in missing_images:
+        warnings.append(f"存在しない画像を参照しています: {image_path}")
     return {
         "warning_count": len(warnings),
         "warnings": warnings,
         "valid_paper_ids": sorted(valid_ids),
         "cited_paper_ids": sorted(cited_ids),
     }
+
+
+def _missing_image_links(
+    report: str,
+    research_dir: str | Path | None = None,
+    report_path: str | Path | None = None,
+) -> list[str]:
+    if report_path is not None:
+        base_dir = Path(report_path).parent
+    elif research_dir is not None:
+        candidate = Path(research_dir)
+        base_dir = candidate.parent if candidate.suffix == ".md" else candidate / "artifacts"
+    else:
+        return []
+    missing: list[str] = []
+    for match in re.finditer(r"!\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)", report):
+        raw_path = match.group(1).strip().strip("<>")
+        if not raw_path:
+            continue
+        lowered = raw_path.lower()
+        if (
+            lowered.startswith("http://")
+            or lowered.startswith("https://")
+            or lowered.startswith("data:")
+            or lowered.startswith("mailto:")
+            or lowered.startswith("#")
+        ):
+            continue
+        image_path = Path(raw_path)
+        target = image_path if image_path.is_absolute() else base_dir / image_path
+        if not target.exists():
+            missing.append(raw_path)
+    return missing
 
 
 def _known_facts(papers: list[Paper]) -> list[str]:

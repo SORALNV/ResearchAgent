@@ -255,10 +255,11 @@ def test_research_discuss_runs_llm_chosen_search_query(tmp_path):
     discord.inject(orchestrator, "/re plan")
 
 
-    discord.inject_message(orchestrator, "planning dialogue")
     result = discord.inject_message(orchestrator, "類似論文を踏まえて方向性を決めたい")
     assert result.ok
-    assert "類似研究も少し見ました" in result.message
+    assert "🔍 必要そうだったので類似研究を検索しました" in result.message
+    assert "https://example.test/papers/research-harnesses" in result.message
+    assert "内容:" in result.message
     session = orchestrator.store.load()
     assert session.planning_scout["query"] == "research harness agent evaluation"
     entries = [
@@ -266,6 +267,11 @@ def test_research_discuss_runs_llm_chosen_search_query(tmp_path):
         for line in config.journal_path(session.session_id).read_text(encoding="utf-8").splitlines()
     ]
     assert any(entry["event_type"] == "planning_search_queries_generated" for entry in entries)
+
+    # 既に紹介した論文は繰り返し紹介しない
+    second = discord.inject_message(orchestrator, "続きを相談したい")
+    assert second.ok
+    assert "https://example.test/papers/research-harnesses" not in second.message
 
 
 def test_custom_research_archive_dir_is_used(tmp_path):

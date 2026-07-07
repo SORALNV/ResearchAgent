@@ -717,16 +717,37 @@ class ResearchOrchestrator:
         if not reports:
             return ""
         scout = session.planning_scout or {}
-        primary = scout.get("primary_comparison") or {}
-        paper_id = primary.get("paper_id")
-        title = primary.get("title")
-        comparison = f"{title} [{paper_id}]" if paper_id and title else "候補文献"
-        return (
-            "\n\n"
-            f"ちなみに必要そうだったので、裏で類似研究も少し見ました。"
-            f"今は {comparison} を仮の比較対象に置けます。"
-            "ただ、ここでは結論にせず、壁打ちの材料として使いましょう。"
+        similar = scout.get("similar_research") or []
+        introduced = {
+            paper_id
+            for paper_id in (session.planning_answers.get("introduced_paper_ids") or "").split(",")
+            if paper_id
+        }
+        candidates = sorted(
+            (item for item in similar if item.get("paper_id") and item["paper_id"] not in introduced),
+            key=lambda item: item.get("relevance_score") or 0,
+            reverse=True,
+        )[:3]
+        if not candidates:
+            return ""
+        lines = ["", "", "🔍 必要そうだったので類似研究を検索しました。近そうなものを紹介します:"]
+        for item in candidates:
+            year = item.get("year") or "年不明"
+            lines.append("")
+            lines.append(f"**{item['title']}** ({year}) [{item['paper_id']}]")
+            if item.get("url"):
+                lines.append(str(item["url"]))
+            body = " ".join(str(item.get("abstract_excerpt") or item.get("summary") or "").split())
+            if body and body != "未確認":
+                lines.append(f"内容: {body[:500]}")
+        lines.append("")
+        lines.append(
+            "いずれもabstractベースで、本文の手法詳細・実験条件までは未確認です。"
+            "詳しく知りたいものや、比較対象にしたいものがあれば言ってください。"
         )
+        introduced.update(item["paper_id"] for item in candidates)
+        session.planning_answers["introduced_paper_ids"] = ",".join(sorted(introduced))
+        return "\n".join(lines)
 
     def _run_planning_scout(self, session: ResearchSession, query: str, send_discord: bool) -> str:
         self._record(

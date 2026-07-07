@@ -1,0 +1,2 @@
+{"question":"研究エージェントハーネスの信頼性を高めるには何を優先すべきか？","expected_keywords":["restartability","journal","approval","cost"],"required_source_types":["fake","arxiv"],"must_not_claim":["完全自律化すべき","出典なしで有効と証明済み"],"evaluation_notes":"MVP後は大規模化より再開性、出典、コスト上限を優先する。"}
+{"question":"自動文献調査で出典なし断定を避けるには？","expected_keywords":["citation","paper_id","unverified"],"required_source_types":["fake","arxiv"],"must_not_claim":["全ての主張は正しい","評価なしでRAGを導入"],"evaluation_notes":"paper_id付き主張と未確認ラベルを確認する。"}

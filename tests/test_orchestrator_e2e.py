@@ -4,24 +4,40 @@ from harness.config import HarnessConfig
 from harness.discord_adapter import FakeDiscordAdapter
 from harness.modes import Mode
 from harness.orchestrator import ResearchOrchestrator
+from harness.planning_dialogue import DialogueTurnResult
+
+
+class BasicPlanningDialogue:
+    def converse(self, session, user_text, search_callback, image_paths=None):
+        return DialogueTurnResult(
+            "今の方向だと、まずは何を既存研究と違うと言うのかを絞るのが先です。",
+            "thread-basic",
+            [],
+            "",
+        )
 
 
 def make_orchestrator(tmp_path):
     config = HarnessConfig(project_root=tmp_path, max_rounds=3, fresh_interval=2)
     discord = FakeDiscordAdapter()
-    return ResearchOrchestrator(config=config, discord=discord), discord, config
+    orchestrator = ResearchOrchestrator(config=config, discord=discord)
+    orchestrator.planning_dialogue = BasicPlanningDialogue()
+    return orchestrator, discord, config
 
 
 class QueryingPlanningDialogue:
-    def propose_search_queries(self, session, user_text, purpose):
-        return ["research harness agent evaluation"]
-
-    def respond(self, session, user_text, purpose, image_paths=None):
-        return """## PLANNING壁打ち
-LLMが類似研究検索結果を踏まえて壁打ちします。
+    def converse(self, session, user_text, search_callback, image_paths=None):
+        search_callback("research harness agent evaluation")
+        return DialogueTurnResult(
+            """## PLANNING壁打ち
+LLMが類似研究検索結果 [P-001] を踏まえて壁打ちします。
 
 PLAN_UPDATE:
-GOAL_CRITERIA: 研究ハーネスMVPのE2E動作を確認できたら成功"""
+GOAL_CRITERIA: 研究ハーネスMVPのE2E動作を確認できたら成功""",
+            "thread-querying",
+            ["research harness agent evaluation"],
+            "",
+        )
 
 
 def test_goal_to_start_approval_approve_stop_e2e(tmp_path):
@@ -41,6 +57,7 @@ def test_goal_to_start_approval_approve_stop_e2e(tmp_path):
     session = orchestrator.store.load()
     assert planning_result.mode == "PLANNING"
     assert "PLANNING壁打ち" in planning
+    assert session.plan_thread_id == "thread-querying"
     assert session.version_label == "V001.0"
     assert session.research_dir
     assert "research_runs" in session.research_dir
@@ -257,16 +274,15 @@ def test_research_discuss_runs_llm_chosen_search_query(tmp_path):
 
     result = discord.inject_message(orchestrator, "類似論文を踏まえて方向性を決めたい")
     assert result.ok
-    assert "🔍 必要そうだったので類似研究を検索しました" in result.message
+    assert "P-001:" in result.message
     assert "https://example.test/papers/research-harnesses" in result.message
-    assert "内容:" in result.message
     session = orchestrator.store.load()
     assert session.planning_scout["query"] == "research harness agent evaluation"
     entries = [
         json.loads(line)
         for line in config.journal_path(session.session_id).read_text(encoding="utf-8").splitlines()
     ]
-    assert any(entry["event_type"] == "planning_search_queries_generated" for entry in entries)
+    assert any(entry["event_type"] == "planning_scout_started" for entry in entries)
 
     # 既に紹介した論文は繰り返し紹介しない
     second = discord.inject_message(orchestrator, "続きを相談したい")

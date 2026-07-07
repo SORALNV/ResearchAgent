@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import shlex
+import json
 import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from harness.config import HarnessConfig, effective_model_name
-from harness.planning import render_planning_scout
 from harness.state import ResearchSession
 
 
@@ -56,31 +58,164 @@ def _render_items(items: list[str], empty: str) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
+@dataclass
+class DialogueTurnResult:
+    text: str
+    thread_id: str
+    searches: list[str]
+    error: str
+
+
+@dataclass
+class CodexRunResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
 class PlanningDialogueRunner:
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
 
-    def respond(
+    def converse(
         self,
         session: ResearchSession,
         user_text: str,
-        purpose: str,
+        search_callback: Callable[[str], str],
         image_paths: list[str] | None = None,
-    ) -> str:
-        prompt = self._build_prompt(session, user_text, purpose)
-        output = self._run_llm(session, prompt, image_paths=image_paths)
-        return output or self._fallback_response(session, user_text)
+    ) -> DialogueTurnResult:
+        if not (
+            self.config.main_agent_command
+            or self.config.claude_agent_command
+            or self.config.sub_agent_command
+        ):
+            return DialogueTurnResult(
+                text="",
+                thread_id="",
+                searches=[],
+                error="PLAN LLMコマンド未設定（SUB_AGENT_COMMAND等）",
+            )
+        self._append_dialogue_log(session, "sora", user_text)
+        output_path = self._last_message_path(session)
+        thread_id = session.plan_thread_id
+        searches: list[str] = []
 
-    def propose_search_queries(self, session: ResearchSession, user_text: str, purpose: str) -> list[str]:
-        prompt = self._build_search_prompt(session, user_text, purpose)
-        output = self._run_llm(session, prompt)
-        if output:
-            queries = self.extract_search_queries(output)
-            if queries:
-                return queries[:2]
-            if self._declines_search(output):
-                return []
-        return self._fallback_search_queries(session, user_text)
+        if thread_id:
+            command = self._build_resume_command(thread_id, session, output_path, image_paths=image_paths)
+            run = self._run_codex(command, user_text, session, output_path)
+            if run.returncode != 0:
+                summary = self._recent_dialogue_summary(session)
+                prompt = self._build_initial_prompt(session, user_text, dialogue_summary=summary)
+                command = self._build_start_command(session, output_path, image_paths=image_paths)
+                run = self._run_codex(command, prompt, session, output_path)
+                thread_id, first_text = self._extract_run_payload(run, output_path)
+            else:
+                parsed_thread_id, first_text = self._extract_run_payload(run, output_path)
+                thread_id = parsed_thread_id or thread_id
+        else:
+            prompt = self._build_initial_prompt(session, user_text)
+            command = self._build_start_command(session, output_path, image_paths=image_paths)
+            run = self._run_codex(command, prompt, session, output_path)
+            thread_id, first_text = self._extract_run_payload(run, output_path)
+
+        if run.returncode != 0:
+            return DialogueTurnResult(
+                text="",
+                thread_id=thread_id,
+                searches=searches,
+                error=self._short_error(run),
+            )
+        if not thread_id:
+            return DialogueTurnResult(
+                text="",
+                thread_id="",
+                searches=searches,
+                error="thread_idを取得できませんでした",
+            )
+
+        queries = self.extract_search_queries(first_text)[:2]
+        final_text = first_text
+        if queries:
+            result_blocks: list[str] = []
+            for query in queries:
+                searches.append(query)
+                try:
+                    search_text = search_callback(query)
+                except Exception as exc:
+                    search_text = f"検索に失敗しました: {exc}"
+                self._append_dialogue_log(session, "search", f"SEARCH_QUERY: {query}\n{search_text}")
+                result_blocks.append(f"SEARCH_QUERY: {query}\n{search_text}")
+            followup = (
+                "検索結果:\n"
+                + "\n\n".join(result_blocks)
+                + "\n\nこの結果を踏まえて、Soraへの返答を完成させてください。再検索は不要です。"
+            )
+            command = self._build_resume_command(thread_id, session, output_path)
+            run = self._run_codex(command, followup, session, output_path)
+            parsed_thread_id, followup_text = self._extract_run_payload(run, output_path)
+            if run.returncode != 0:
+                return DialogueTurnResult(
+                    text="",
+                    thread_id=parsed_thread_id or thread_id,
+                    searches=searches,
+                    error=self._short_error(run),
+                )
+            thread_id = parsed_thread_id or thread_id
+            final_text = self._strip_search_queries(followup_text)
+
+        self._append_dialogue_log(session, "assistant", final_text)
+        return DialogueTurnResult(text=final_text, thread_id=thread_id, searches=searches, error="")
+
+    def _build_start_command(
+        self,
+        session: ResearchSession,
+        output_path: Path | None,
+        image_paths: list[str] | None = None,
+    ) -> list[str]:
+        command = [
+            self._codex_executable(),
+            "exec",
+            "-m",
+            effective_model_name(self.config.plan_agent_model),
+            "--cd",
+            session.research_dir or str(self.config.project_root),
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "--color",
+            "never",
+            "--json",
+        ]
+        if output_path is not None:
+            command.extend(["--output-last-message", str(output_path)])
+        for image_path in image_paths or []:
+            command.extend(["--image", image_path])
+        command.append("-")
+        return command
+
+    def _build_resume_command(
+        self,
+        thread_id: str,
+        session: ResearchSession,
+        output_path: Path | None,
+        image_paths: list[str] | None = None,
+    ) -> list[str]:
+        command = [
+            self._codex_executable(),
+            "exec",
+            "resume",
+            thread_id,
+            "-m",
+            effective_model_name(self.config.plan_agent_model),
+            "--skip-git-repo-check",
+            "--json",
+        ]
+        if output_path is not None:
+            command.extend(["--output-last-message", str(output_path)])
+        for image_path in image_paths or []:
+            command.extend(["-i", image_path])
+        command.append("-")
+        return command
 
     @staticmethod
     def extract_search_queries(text: str) -> list[str]:
@@ -109,27 +244,15 @@ class PlanningDialogueRunner:
                     queries.append(query)
         return queries
 
-    def _run_llm(
+    def _run_codex(
         self,
-        session: ResearchSession,
+        command: list[str],
         prompt: str,
-        image_paths: list[str] | None = None,
-    ) -> str:
-        command_text = (
-            self.config.main_agent_command
-            or self.config.claude_agent_command
-            or self.config.sub_agent_command
-        )
-        if not command_text:
-            return ""
-        command = self._build_command(command_text, session)
-        output_path = self._last_message_path(session)
-        if output_path is not None and len(command) >= 2 and command[0].endswith("codex") and command[1] == "exec":
-            insert_at = command.index("-") if "-" in command else len(command)
-            command[insert_at:insert_at] = ["--output-last-message", str(output_path)]
-            for image_path in image_paths or []:
-                command[insert_at:insert_at] = ["--image", image_path]
-                insert_at += 2
+        session: ResearchSession,
+        output_path: Path | None,
+    ) -> CodexRunResult:
+        if output_path is not None and output_path.exists():
+            output_path.unlink()
         try:
             completed = subprocess.run(
                 command,
@@ -140,37 +263,65 @@ class PlanningDialogueRunner:
                 cwd=session.research_dir or str(self.config.project_root),
                 check=False,
             )
-        except subprocess.TimeoutExpired:
-            return ""
-        stdout = completed.stdout.strip()
-        if completed.returncode != 0:
-            return ""
+        except subprocess.TimeoutExpired as exc:
+            return CodexRunResult(124, exc.stdout or "", "timeout")
+        return CodexRunResult(completed.returncode, completed.stdout, completed.stderr)
+
+    def _extract_run_payload(self, run: CodexRunResult, output_path: Path | None) -> tuple[str, str]:
+        thread_id = ""
+        last_agent_text = ""
+        for line in run.stdout.splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if item.get("type") == "thread.started":
+                thread_id = str(item.get("thread_id") or "")
+            if item.get("type") != "item.completed":
+                continue
+            payload = item.get("item") or item
+            text = self._extract_agent_text(payload)
+            if text:
+                last_agent_text = text
         if output_path is not None and output_path.exists():
             final = output_path.read_text(encoding="utf-8").strip()
             if final:
-                return final
-        return stdout
+                return thread_id, final
+        return thread_id, last_agent_text or run.stdout.strip()
 
-    def _build_command(self, command_text: str, session: ResearchSession) -> list[str]:
-        parts = shlex.split(command_text)
-        executable = Path(parts[0]).name if parts else ""
-        if executable == "codex" and len(parts) == 1:
-            return [
-                parts[0],
-                "exec",
-                "-m",
-                effective_model_name(self.config.plan_agent_model),
-                "--cd",
-                session.research_dir or str(self.config.project_root),
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--ephemeral",
-                "--color",
-                "never",
-                "-",
+    def _extract_agent_text(self, payload: object) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        if payload.get("type") == "agent_message" and isinstance(payload.get("text"), str):
+            return payload["text"]
+        if isinstance(payload.get("agent_message"), dict):
+            message = payload["agent_message"]
+            if isinstance(message.get("text"), str):
+                return message["text"]
+        content = payload.get("content")
+        if isinstance(content, list):
+            parts = [
+                str(part.get("text"))
+                for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
             ]
-        return parts
+            return "\n".join(parts).strip()
+        return ""
+
+    def _codex_executable(self) -> str:
+        command_text = (
+            self.config.main_agent_command
+            or self.config.claude_agent_command
+            or self.config.sub_agent_command
+            or "codex"
+        )
+        return command_text.split()[0]
+
+    def _short_error(self, run: CodexRunResult) -> str:
+        detail = (run.stderr or run.stdout or "").strip()
+        if not detail:
+            detail = f"returncode={run.returncode}"
+        return detail[-200:]
 
     def _last_message_path(self, session: ResearchSession) -> Path | None:
         if not session.research_dir:
@@ -179,20 +330,19 @@ class PlanningDialogueRunner:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _build_prompt(self, session: ResearchSession, user_text: str, purpose: str) -> str:
-        scout = render_planning_scout(session.planning_scout) if session.planning_scout else "未実行"
-        history = self._dialogue_history(session)
+    def _build_initial_prompt(self, session: ResearchSession, user_text: str, dialogue_summary: str = "") -> str:
         goal_criteria = _render_items(session.goal_criteria, "未確定")
         research_methods = _render_items(session.research_methods, "未確定")
         open_questions = _render_items(session.open_questions, "なし")
+        summary_block = f"\nこれまでの会話の要約:\n{dialogue_summary}\n" if dialogue_summary else ""
         return f"""あなたはResearchAgentのPLANNING壁打ち担当です。
-目的: {purpose}
 
 設計思想:
 - ResearchAgentハーネスは研究問題を単独で解く主体ではなく、大きめのAGENTS.mdのように方針・制約・証跡・役割分担を保持する制御文脈である
 - 単体のLLM回答で結論を出さない
 - 研究はmain/sub/review/freshなどの複数役割、論文検索ツール、承認ゲートを組み合わせたオーケストレーションで進める
 - 壁打ち担当の役割は、Soraの意図を明確にし、必要なツールやエージェント呼び出しを提案し、未確認点を分離すること
+- これは継続的な会話であり、あなたは過去のやり取りを覚えている。同じ説明を繰り返さず、会話を前に進める
 
 壁打ちの目的:
 - 研究テーマ・主要比較対象との差分・ゴール条件（何をもって完了/成功とみなすか）・研究方法・成果物を確定させること
@@ -210,10 +360,11 @@ class PlanningDialogueRunner:
 - 新規性は断定せず、未確認点を分ける
 - 1つのLLMとして最終判断や実行結果をでっち上げない
 - 必要なら「次にmain/sub/review/freshのどの役割を使うべきか」を示す
-- コマンド案は必要な時だけ最後に1つだけ示す
-- ファイル編集やコマンド実行はしない
+- ファイル編集やコマンド実行はしない。テキスト返答のみ
 
 構造化記録:
+- 類似研究・文献を調べたい場合は、返答の最後に SEARCH_QUERY: <英語クエリ> 行を最大2つ付ける
+- ハーネスが検索を実行し、結果を次のメッセージで渡す。必要なときだけ使う
 - ユーザーとの合意が取れた項目、またはユーザーが明示指定した方法・条件があれば、返答の最後にPLAN_UPDATEブロックで記録する。合意していないものは書かない
 - PLAN_UPDATEブロックは字数制限の外とする
 - あなた側で研究を進める上で明確にしておきたい点があればOPEN_QUESTIONとして記録し、会話の中でユーザーに聞く。解決したらRESOLVED_QUESTIONで消す
@@ -237,82 +388,46 @@ RESOLVED_QUESTION: <解決した確認事項の本文>
 {open_questions}
 
 Soraの入力:
-{user_text}
-
-直近の対話履歴:
-{history}
-
-現在の類似研究スカウト:
-{scout}
+{user_text}{summary_block}
 """
 
-    def _build_search_prompt(self, session: ResearchSession, user_text: str, purpose: str) -> str:
-        scout = render_planning_scout(session.planning_scout) if session.planning_scout else "未実行"
-        history = self._dialogue_history(session)
-        return f"""あなたはResearchAgentの類似研究検索クエリ設計担当です。
-目的: {purpose}
+    def _dialogue_log_path(self, session: ResearchSession) -> Path | None:
+        if not session.research_dir:
+            return None
+        return Path(session.research_dir) / "dialogue.jsonl"
 
-設計思想:
-- 論文検索は壁打ちLLMが必要に応じて使うツールであり、ハーネスが常に自動実行するものではない
-- 単体LLMで研究判断を完結させず、検索結果は後続のmain/sub/review/freshのオーケストレーション材料として使う
+    def _append_dialogue_log(self, session: ResearchSession, role: str, text: str) -> None:
+        path = self._dialogue_log_path(session)
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "role": role,
+            "text": text,
+        }
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-制約:
-- 日本語で考えてよいが、検索クエリはarXiv等で通りやすい英語中心にする
-- 類似研究調査が不要なら SEARCH_NEEDED: no とだけ返す
-- 必要なら最大2件だけ SEARCH_QUERY: <query> を返す
-- ファイル編集やコマンド実行はしない
-- 出力形式を守る
-
-出力形式:
-SEARCH_NEEDED: yes または no
-SEARCH_QUERY: <query 1>
-SEARCH_QUERY: <query 2>
-REASON: <短い理由>
-
-研究ゴール:
-{session.research_goal}
-
-Soraの入力:
-{user_text}
-
-直近の対話履歴:
-{history}
-
-現在の類似研究スカウト:
-{scout}
-"""
-
-    def _dialogue_history(self, session: ResearchSession) -> str:
-        items = [
-            item
-            for item in session.accepted_ideas[-12:]
-            if item.startswith("Sora discuss:") or item.startswith("PLANNING dialogue:")
-        ]
-        if not items:
+    def _recent_dialogue_summary(self, session: ResearchSession) -> str:
+        path = self._dialogue_log_path(session)
+        if path is None or not path.exists():
             return "なし"
-        return "\n".join(f"- {item[:700]}" for item in items[-8:])
+        entries: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines()[-10:]:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            role = item.get("role") or "unknown"
+            text = str(item.get("text") or "").replace("\n", " ")[:400]
+            entries.append(f"- {role}: {text}")
+        return "\n".join(entries) if entries else "なし"
 
-    def _declines_search(self, text: str) -> bool:
-        compact = text.lower().replace(" ", "")
-        return "search_needed:no" in compact or "検索不要" in text
-
-    def _fallback_search_queries(self, session: ResearchSession, user_text: str) -> list[str]:
-        return []
-
-    def _fallback_response(self, session: ResearchSession, user_text: str) -> str:
-        scout = session.planning_scout or {}
-        primary = scout.get("primary_comparison") or {}
-        questions = scout.get("required_decisions") or [
-            "主要比較対象をどれにするか。",
-            "差分をどこに置くか。",
+    def _strip_search_queries(self, text: str) -> str:
+        lines = [
+            line
+            for line in text.splitlines()
+            if not line.strip().lower().startswith("search_query")
         ]
-        comparison = (
-            f"{primary.get('title')} [{primary.get('paper_id')}]"
-            if primary.get("paper_id") and primary.get("title")
-            else "まだ主要比較対象は未確認"
-        )
-        return (
-            f"いいと思います。今の方向だと、まずは「何を既存研究と違うと言うのか」を絞るのが先です。\n\n"
-            f"比較対象は {comparison} です。ここを基準に、性能で勝つ話にするのか、運用コストや再現性の条件を変える話にするのかを決めたいです。新規性はまだ断定せず、仮説扱いで進めるのが安全です。\n\n"
-            f"いま決めるなら、{questions[0]} もう一つ、最初の成果物は比較表・小さな実装・調査メモのどれに寄せますか？"
-        )
+        return "\n".join(lines).rstrip()

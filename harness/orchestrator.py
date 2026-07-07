@@ -123,18 +123,23 @@ class ResearchOrchestrator:
             user_instruction=text,
             commands_run=["/re new <text>"],
         )
-        scout_reports = self._generate_and_run_planning_searches(
+        search_callback = lambda query: self._planning_search_for_dialogue(session, query)
+        result = self.planning_dialogue.converse(
             session,
-            user_text=text,
-            purpose="研究開始直後に類似研究の有無を確認する検索語を作る",
+            text,
+            search_callback,
         )
-        dialogue = self.planning_dialogue.respond(
-            session,
-            user_text=text,
-            purpose="研究開始直後に、テーマ確定ではなく設計思想・制約・役割分担・必要ツールを整理する壁打ち",
-        )
+        if result.thread_id:
+            session.plan_thread_id = result.thread_id
+            self.store.save(session)
+        if result.error:
+            message = f"⚠️ PLAN LLMの応答に失敗しました（{result.error}）。もう一度送ってください。"
+            self._record(session, event_type="error", errors=[result.error])
+            return message
+        dialogue = result.text
         session.accepted_ideas.append(f"PLANNING dialogue: {dialogue[:500]}")
         brief = self._brief_writer(session).write(session)
+        citation_footer = self._format_planning_citation_footer(session, dialogue, result.searches)
         report = self._format_report(
             session,
             purpose="研究開始前の要件定義",
@@ -174,7 +179,7 @@ class ResearchOrchestrator:
             event_type="discord_report_sent",
             discord_report=report,
         )
-        return report + self._format_auto_search_reports(scout_reports)
+        return report + citation_footer
 
     def new_session(self) -> str:
         previous = self.store.load()
@@ -383,20 +388,23 @@ class ResearchOrchestrator:
         if session.mode != Mode.PLANNING:
             return f"plan中の通常メッセージはPLANNING中だけ有効です。現在: {session.mode.value}"
         session.accepted_ideas.append(f"Sora discuss: {text}")
-        scout_reports = self._generate_and_run_planning_searches(
+        search_callback = lambda query: self._planning_search_for_dialogue(session, query)
+        result = self.planning_dialogue.converse(
             session,
-            user_text=text,
-            purpose="壁打ち中の入力から必要な類似研究の追加検索語を作る",
-        )
-        dialogue = self.planning_dialogue.respond(
-            session,
-            user_text=text,
-            purpose="Soraとの継続壁打ち。単一LLMで解決せず、テーマ、比較対象、差分、成果物、次に使う役割やツールを具体化する。",
+            text,
+            search_callback,
             image_paths=attachments,
         )
+        if result.thread_id:
+            session.plan_thread_id = result.thread_id
+        if result.error:
+            self.store.save(session)
+            self._record(session, event_type="error", user_instruction=text, errors=[result.error])
+            return f"⚠️ PLAN LLMの応答に失敗しました（{result.error}）。もう一度送ってください。"
+        dialogue = result.text
         display_text, plan_updates = parse_plan_update(dialogue)
         update_summary = self._apply_plan_update(session, plan_updates)
-        response = display_text + self._format_auto_search_summary(session, scout_reports)
+        response = display_text + self._format_planning_citation_footer(session, display_text, result.searches)
         if update_summary:
             response = response.rstrip() + f"\n\n📌 プラン更新: {update_summary}"
         session.accepted_ideas.append(f"PLANNING dialogue: {display_text[:500]}")
@@ -686,69 +694,69 @@ class ResearchOrchestrator:
         query = query.strip() or generate_planning_query(session.research_goal)
         return self._run_planning_scout(session, query, send_discord=True)
 
-    def _generate_and_run_planning_searches(
+    def _planning_search_for_dialogue(self, session: ResearchSession, query: str) -> str:
+        self._run_planning_scout(session, query, send_discord=False)
+        similar = (session.planning_scout or {}).get("similar_research") or []
+        lines: list[str] = []
+        for item in similar[:5]:
+            paper_id = item.get("paper_id") or "P-???"
+            title = item.get("title") or "Untitled"
+            year = item.get("year") or "年不明"
+            url = item.get("url") or "URL未確認"
+            summary = " ".join(str(item.get("summary") or "要約未確認").split())[:200]
+            abstract = " ".join(str(item.get("abstract_excerpt") or item.get("abstract") or "").split())[:300]
+            lines.append(f"[{paper_id}] {title} ({year}) | {url} | {summary} | {abstract}")
+        return "\n".join(lines) if lines else "検索結果はありませんでした。"
+
+    def _format_planning_citation_footer(
         self,
         session: ResearchSession,
-        user_text: str,
-        purpose: str,
-    ) -> list[tuple[str, str]]:
-        queries = self.planning_dialogue.propose_search_queries(session, user_text=user_text, purpose=purpose)
-        self._record(
-            session,
-            event_type="planning_search_queries_generated",
-            user_instruction=user_text,
-            main_agent_summary="\n".join(queries) if queries else "検索不要",
-            decision="auto_search" if queries else "no_search",
-            confidence="mid",
-        )
-        reports: list[tuple[str, str]] = []
-        for query in queries[:2]:
-            reports.append((query, self._run_planning_scout(session, query, send_discord=False)))
-        return reports
-
-    def _format_auto_search_reports(self, reports: list[tuple[str, str]]) -> str:
-        if not reports:
+        display_text: str,
+        searches: list[str],
+    ) -> str:
+        if not searches:
             return ""
-        lines = ["", "", "## 自動追加検索"]
-        for query, report in reports:
-            lines.extend(["", f"### query: {query}", report])
-        return "\n".join(lines)
-
-    def _format_auto_search_summary(self, session: ResearchSession, reports: list[tuple[str, str]]) -> str:
-        if not reports:
+        referenced: list[str] = []
+        for token in display_text.replace("\n", " ").split("[P-"):
+            if len(token) >= 4 and token[:3].isdigit() and token[3:4] == "]":
+                paper_id = f"P-{token[:3]}"
+                if paper_id not in referenced:
+                    referenced.append(paper_id)
+        if not referenced:
             return ""
-        scout = session.planning_scout or {}
-        similar = scout.get("similar_research") or []
         introduced = {
             paper_id
             for paper_id in (session.planning_answers.get("introduced_paper_ids") or "").split(",")
             if paper_id
         }
-        candidates = sorted(
-            (item for item in similar if item.get("paper_id") and item["paper_id"] not in introduced),
-            key=lambda item: item.get("relevance_score") or 0,
-            reverse=True,
-        )[:3]
-        if not candidates:
+        paper_rows: dict[str, dict[str, object]] = {}
+        for paper in self._paper_store(session).read_all():
+            data = paper if isinstance(paper, dict) else getattr(paper, "__dict__", {})
+            paper_id = str(data.get("paper_id") or "")
+            if paper_id:
+                paper_rows[paper_id] = data
+        for item in (session.planning_scout or {}).get("similar_research") or []:
+            paper_id = str(item.get("paper_id") or "")
+            if paper_id and paper_id not in paper_rows:
+                paper_rows[paper_id] = item
+        lines: list[str] = []
+        for paper_id in referenced:
+            if paper_id in introduced:
+                continue
+            paper = paper_rows.get(paper_id)
+            if not paper:
+                continue
+            title = paper.get("title") or "Untitled"
+            year = paper.get("year") or "年不明"
+            url = paper.get("url") or "URL未確認"
+            lines.append(f"{paper_id}: {title} ({year}) {url}")
+            introduced.add(paper_id)
+            if len(lines) >= 3:
+                break
+        if not lines:
             return ""
-        lines = ["", "", "🔍 必要そうだったので類似研究を検索しました。近そうなものを紹介します:"]
-        for item in candidates:
-            year = item.get("year") or "年不明"
-            lines.append("")
-            lines.append(f"**{item['title']}** ({year}) [{item['paper_id']}]")
-            if item.get("url"):
-                lines.append(str(item["url"]))
-            body = " ".join(str(item.get("abstract_excerpt") or item.get("summary") or "").split())
-            if body and body != "未確認":
-                lines.append(f"内容: {body[:500]}")
-        lines.append("")
-        lines.append(
-            "いずれもabstractベースで、本文の手法詳細・実験条件までは未確認です。"
-            "詳しく知りたいものや、比較対象にしたいものがあれば言ってください。"
-        )
-        introduced.update(item["paper_id"] for item in candidates)
         session.planning_answers["introduced_paper_ids"] = ",".join(sorted(introduced))
-        return "\n".join(lines)
+        return "\n\n" + "\n".join(lines)
 
     def _run_planning_scout(self, session: ResearchSession, query: str, send_discord: bool) -> str:
         self._record(

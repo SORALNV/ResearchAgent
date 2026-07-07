@@ -196,21 +196,28 @@ If the internal novelty gate has produced a blocking result, `/re start` stays i
 
 ## Planning Dialogue And Scout
 
-`/re plan` and normal PLANNING messages let the LLM decide whether to run similar-research search. If Sora says things like "これ調べて" or "類似研究ある？", the planning agent can generate search queries and use the paper-search tool internally. The internal scout strengthens the initial PLANNING phase:
+`/re plan` and normal PLANNING messages run as one stateful Codex thread. The first PLANNING turn creates a thread and stores its `thread_id` in session state; later turns resume that thread, so the planning agent keeps conversational context instead of rebuilding it from short snippets.
 
-- generates a search query from the research goal, or uses the provided query
+The planning agent requests literature help only when needed by ending its reply with up to two `SEARCH_QUERY: <english query>` lines. The harness then runs the internal paper scout, sends compact results back into the same Codex thread, and posts the completed answer. Scout output is not posted directly to Discord unless Sora explicitly runs `/re scout` or `/re search`.
+
+The internal scout:
+
 - searches for similar research through the configured paper provider
 - saves candidates to `papers.jsonl`
 - deduplicates papers
-- creates source-backed suggestions with paper IDs such as `[P-001]`
+- creates source-backed suggestions with paper IDs such as `[P-001]` for the planning agent
 - proposes primary comparison, overlap points, differentiation hypotheses, weakness points, required decisions, risks, and questions for Sora
 - evaluates a `Novelty Status`: `supported`, `unclear`, `crowded`, or `needs_human_decision`
 - blocks `/re start` when the status is `unclear`, `crowded`, or `needs_human_decision`
 - writes the result into `research_brief.md`
 
+When a planning reply cites newly introduced paper IDs, the harness appends a short citation footer with `paper_id: title (year) url`, up to three lines. Already introduced papers are not repeated.
+
 Use the scout output to decide whether the research should be a reproduction, comparison, implementation prototype, new evaluation, or a narrower investigation. Do not claim novelty without a source-backed comparison; mark uncertain points as `未確認` or `要検証`.
 
 The planning dialogue can also emit a `PLAN_UPDATE` block to append agreed goal criteria, methods, and open questions, or resolve previously open questions. The block is stripped from the Discord-facing reply and kept as structured session state.
+
+Each planning turn is appended to `dialogue.jsonl` in the research directory as `{timestamp, role, text}`. If a stored Codex thread cannot be resumed, the harness starts a new thread once and includes the recent dialogue log as context. If the PLAN LLM call fails, the harness replies with a short error notice instead of canned fallback text.
 
 Fake-provider results are useful for tests, but they are not treated as real literature evidence. If only fake papers are available, the novelty gate returns `needs_human_decision`.
 

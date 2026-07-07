@@ -70,6 +70,7 @@ class ResearchSession:
     planning_answers: dict[str, str] = field(default_factory=dict)
     planning_scout: dict[str, Any] = field(default_factory=dict)
     phase: str = "planning"
+    plan_thread_id: str = ""
     phase_gates: dict[str, PhaseGate] = field(default_factory=dict)
     phase_decisions: list[dict[str, str]] = field(default_factory=list)
     last_trace_node_id: str | None = None
@@ -146,6 +147,7 @@ class ResearchSession:
             planning_answers=dict(data.get("planning_answers", {})),
             planning_scout=dict(data.get("planning_scout", {})),
             phase=data.get("phase", "planning"),
+            plan_thread_id=data.get("plan_thread_id", ""),
             phase_gates=phase_gates,
             phase_decisions=list(data.get("phase_decisions", [])),
             last_trace_node_id=data.get("last_trace_node_id"),

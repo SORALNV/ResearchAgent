@@ -4,24 +4,19 @@ from harness.discord_adapter import FakeDiscordAdapter, bot_display_mode
 from harness.modes import Mode
 from harness.command_parser import parse_research_command
 from harness.orchestrator import ResearchOrchestrator
-from harness.planning_dialogue import PlanningDialogueRunner, parse_plan_update
+from harness.planning_dialogue import DialogueTurnResult, PlanningDialogueRunner, parse_plan_update
 from harness.state import ResearchSession
 
 
 class StaticPlanningDialogue:
-    def propose_search_queries(self, session, user_text: str, purpose: str) -> list[str]:
-        return []
-
-    def respond(self, session, user_text: str, purpose: str, image_paths=None) -> str:
-        return "短い壁打ち返答です。"
+    def converse(self, session, user_text: str, search_callback, image_paths=None) -> DialogueTurnResult:
+        return DialogueTurnResult("短い壁打ち返答です。", "thread-static", [], "")
 
 
 class StructuredPlanningDialogue:
-    def propose_search_queries(self, session, user_text: str, purpose: str) -> list[str]:
-        return []
-
-    def respond(self, session, user_text: str, purpose: str, image_paths=None) -> str:
-        return """ここは表示される壁打ち本文です。
+    def converse(self, session, user_text: str, search_callback, image_paths=None) -> DialogueTurnResult:
+        return DialogueTurnResult(
+            """ここは表示される壁打ち本文です。
 
 PLAN_UPDATE:
 GOAL_CRITERIA: 比較表と最小プロトタイプで有効性を確認できたら成功
@@ -29,7 +24,33 @@ METHOD: 既存研究との差分表を作る
 OPEN_QUESTION: 評価対象データセットを何にするか
 OPEN_QUESTION: 成果物をどこまで実装するか
 RESOLVED_QUESTION: 成果物をどこまで実装するか
-"""
+""",
+            "thread-structured",
+            [],
+            "",
+        )
+
+
+class ErrorPlanningDialogue:
+    def converse(self, session, user_text: str, search_callback, image_paths=None) -> DialogueTurnResult:
+        return DialogueTurnResult("", "thread-error", [], "boom")
+
+
+def test_discuss_error_returns_warning_not_fallback(tmp_path):
+    discord = FakeDiscordAdapter()
+    orchestrator = ResearchOrchestrator(
+        config=HarnessConfig(project_root=tmp_path, paper_provider="fake"),
+        discord=discord,
+    )
+    orchestrator.planning_dialogue = ErrorPlanningDialogue()
+    orchestrator.handle(Command("new_session"))
+    orchestrator.handle(Command("enter_plan"))
+
+    result = discord.inject_message(orchestrator, "LLM error path")
+
+    assert result.ok
+    assert "⚠️ PLAN LLMの応答に失敗しました（boom）。もう一度送ってください。" == result.message
+    assert "いいと思います" not in result.message
 
 
 def test_single_command_entrypoint_tracks_context(tmp_path):
@@ -139,34 +160,41 @@ def test_parse_plan_update_ignores_body_before_block():
     assert updates == {"research_methods": ["実験ログを残す"]}
 
 
-def test_planning_dialogue_codex_command_matches_current_cli(tmp_path):
+def test_planning_dialogue_codex_start_command_matches_current_cli(tmp_path):
     config = HarnessConfig(project_root=tmp_path, sub_agent_command="codex")
     runner = PlanningDialogueRunner(config)
     session = ResearchSession.new("command test")
     session.research_dir = str(tmp_path)
-    command = runner._build_command("codex", session)
+    command = runner._build_start_command(session, runner._last_message_path(session))
+    assert command[:2] == ["codex", "exec"]
     assert "--ask-for-approval" not in command
+    assert "--ephemeral" not in command
     assert "-m" in command
     assert effective_model_name(config.plan_agent_model) in command
     assert "--sandbox" in command
-    assert "--ephemeral" in command
+    assert "--json" in command
+    assert "--output-last-message" in command
     assert command[-1] == "-"
 
 
-def test_planning_dialogue_adds_images_to_codex_command(tmp_path):
+def test_planning_dialogue_resume_command_omits_unsupported_flags(tmp_path):
     config = HarnessConfig(project_root=tmp_path, sub_agent_command="codex")
     runner = PlanningDialogueRunner(config)
     session = ResearchSession.new("image command test")
     session.research_dir = str(tmp_path)
-    command = runner._build_command("codex", session)
-    output_path = runner._last_message_path(session)
-    insert_at = command.index("-")
-    command[insert_at:insert_at] = ["--output-last-message", str(output_path)]
-    for image_path in [str(tmp_path / "sample.png")]:
-        command[insert_at:insert_at] = ["--image", image_path]
-        insert_at += 2
-    assert "--image" in command
+    command = runner._build_resume_command(
+        "thread-1",
+        session,
+        runner._last_message_path(session),
+        image_paths=[str(tmp_path / "sample.png")],
+    )
+    assert command[:4] == ["codex", "exec", "resume", "thread-1"]
+    assert "-i" in command
     assert str(tmp_path / "sample.png") in command
+    assert "--sandbox" not in command
+    assert "--cd" not in command
+    assert "--color" not in command
+    assert command[-1] == "-"
 
 
 def test_bot_display_mode_mapping():
@@ -218,6 +246,7 @@ def test_discuss_applies_plan_update_and_strips_block(tmp_path):
     assert session.goal_criteria == ["比較表と最小プロトタイプで有効性を確認できたら成功"]
     assert session.research_methods == ["既存研究との差分表を作る"]
     assert session.open_questions == ["評価対象データセットを何にするか"]
+    assert session.plan_thread_id == "thread-structured"
     assert any("PLAN_UPDATE" not in item for item in session.accepted_ideas)
     journal = (
         orchestrator.config.journal_path(session.session_id)

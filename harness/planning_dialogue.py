@@ -149,6 +149,7 @@ class PlanningDialogueRunner:
                 "検索結果:\n"
                 + "\n\n".join(result_blocks)
                 + "\n\nこの結果を踏まえて、Soraへの返答を完成させてください。再検索は不要です。"
+                + "論文の内容説明は英語のまま貼らず、日本語に翻訳して紹介してください。"
             )
             command = self._build_resume_command(thread_id, session, output_path)
             run = self._run_codex(command, followup, session, output_path)
@@ -350,6 +351,7 @@ class PlanningDialogueRunner:
 
 制約:
 - 日本語で返す
+- 論文・類似研究の紹介も必ず日本語で行う。タイトルは原文のままでよいが、内容・手法・結果の説明は日本語に翻訳して伝える。英語のabstractをそのまま貼らない
 - ChatGPTと普通に話しているような自然な壁打ちにする
 - レポート形式、長い見出し、網羅的な箇条書きを避ける
 - 返答は原則400〜700字以内。長くても900字を超えない

@@ -102,18 +102,53 @@ class DiscordChannelAdapter:
         self.important_channel_id = int(important_channel_id) if important_channel_id else None
         self.log_channel_id = int(log_channel_id) if log_channel_id else None
         self.important_sent_count = 0
+        self._log_buffer: list[str] = []
+        self._log_flush_task: asyncio.Task | None = None
 
     def send(self, message: str, channel: str = "important") -> None:
         channel_id = self.log_channel_id if channel == "log" else self.important_channel_id
         if channel_id is None:
             return
-        if channel != "log":
-            self.important_sent_count += 1
+        if channel == "log":
+            self._log_buffer.append(message)
+            try:
+                self._ensure_log_flush_task()
+            except (AttributeError, RuntimeError):
+                pass
+            return
+        self.important_sent_count += 1
         try:
             loop = self.client.loop
             loop.create_task(self._send(channel_id, message))
         except RuntimeError:
             asyncio.run(self._send(channel_id, message))
+
+    def _ensure_log_flush_task(self) -> None:
+        if self._log_flush_task is not None and not self._log_flush_task.done():
+            return
+        loop = self.client.loop
+        self._log_flush_task = loop.create_task(self._log_flush_loop())
+
+    async def _log_flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(2)
+            try:
+                await self._flush_log_buffer()
+            except Exception:
+                pass
+
+    async def _flush_log_buffer(self) -> None:
+        if not self._log_buffer or self.log_channel_id is None:
+            return
+        pending = self._log_buffer
+        self._log_buffer = []
+        chunks, remaining = _drain_log_batch(pending)
+        self._log_buffer = remaining + self._log_buffer
+        for chunk in chunks:
+            try:
+                await self._send(self.log_channel_id, chunk)
+            except Exception:
+                pass
 
     async def _send(self, channel_id: int, message: str) -> None:
         channel = self.client.get_channel(channel_id) or await self.client.fetch_channel(channel_id)
@@ -323,6 +358,63 @@ def _chunks(message: str, max_length: int) -> list[str]:
     if len(message) <= max_length:
         return [message]
     return [message[index : index + max_length] for index in range(0, len(message), max_length)]
+
+
+def _drain_log_batch(
+    messages: list[str],
+    max_length: int = 1900,
+    max_chunks: int = 2,
+    separator: str = "\n---\n",
+) -> tuple[list[str], list[str]]:
+    if max_chunks <= 0:
+        return [], messages
+
+    chunks: list[str] = []
+    current_parts: list[str] = []
+    index = 0
+
+    while index < len(messages):
+        message = messages[index]
+
+        if len(message) > max_length:
+            if current_parts:
+                chunks.append(separator.join(current_parts))
+                current_parts = []
+                if len(chunks) >= max_chunks:
+                    return chunks, messages[index:]
+
+            parts = _chunks(message, max_length)
+            available = max_chunks - len(chunks)
+            chunks.extend(parts[:available])
+            if len(parts) > available:
+                return chunks, parts[available:] + messages[index + 1 :]
+
+            index += 1
+            if len(chunks) >= max_chunks:
+                return chunks, messages[index:]
+            continue
+
+        candidate_parts = current_parts + [message]
+        if len(separator.join(candidate_parts)) <= max_length:
+            current_parts = candidate_parts
+            index += 1
+            continue
+
+        if current_parts:
+            chunks.append(separator.join(current_parts))
+            current_parts = []
+            if len(chunks) >= max_chunks:
+                return chunks, messages[index:]
+            continue
+
+        chunks.append(message)
+        index += 1
+        if len(chunks) >= max_chunks:
+            return chunks, messages[index:]
+
+    if current_parts and len(chunks) < max_chunks:
+        chunks.append(separator.join(current_parts))
+    return chunks, []
 
 
 async def _save_plan_attachments(message, session) -> list[str]:

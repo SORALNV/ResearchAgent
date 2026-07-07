@@ -8,6 +8,7 @@ from pathlib import Path
 from harness.approval import ProposedOperation
 from harness.config import HarnessConfig, effective_model_name
 from harness.conversation import ConversationSession
+from harness.experiments import ExperimentStore
 from harness.state import ResearchSession
 
 
@@ -219,6 +220,7 @@ class SubAgentCommandRunner:
         artifact_listing = self._artifact_listing(session)
         papers_path = self.config.papers_path(session.session_id)
         papers_note = str(papers_path) if papers_path.exists() else "なし"
+        experiment_summary = self._experiment_summary(session)
         return f"""あなたは研究ハーネスのsubエージェントです。
 単一タスクだけを実行し、結果を構造化して返してください。
 
@@ -235,6 +237,9 @@ class SubAgentCommandRunner:
 - レポートから図を参照する場合は、artifacts/report.md からの相対パス（figures/xxx.png）を使う
 - matplotlib が使えない場合や図が不適な場合は、markdown表・mermaid記法で代替する
 - 文献に基づく主張には papers.jsonl の出典ID [P-xxx] を付ける。根拠が無い主張は「未確認」と明示する
+- 実験を実行する場合は、1実験=1フォルダ experiments/EXP-xxx_<短い英語slug>/ を作る。中身は config.json（パラメータ・シード・日時・仮説）、results/（数値結果CSV/JSON）、figures/（この実験の図）、notes.md（何をどう実行し何を観察したか）
+- 実験を開始・完了したら experiments.jsonl に1行JSONを追記または更新する。形式: {{"exp_id": "EXP-001", "name": "...", "hypothesis": "...", "status": "planned|running|done|failed", "round_id": N, "metrics": {{}}, "dir": "experiments/EXP-001_...", "created_at": "...", "updated_at": "..."}}。既存の行のexp_idと重複しない次の番号を使う
+- 論文用に清書した図は paper/figures/ にコピーする
 - 最終レポート artifacts/report.md は次の構成で書く: タイトル / Summary / 背景と目的（ゴール条件を明記）/ 方法 / 結果（図表を含む）/ 考察 / 限界と未確認事項 / 次のステップ / 参考文献（URL付き）
 
 session_id: {session.session_id}
@@ -246,6 +251,9 @@ papers_jsonl_path: {papers_note}
 
 artifacts内の既存ファイル:
 {artifact_listing}
+
+実験台帳サマリ:
+{experiment_summary}
 
 確定済みPLAN:
 {plan_text}
@@ -264,6 +272,22 @@ artifacts内の既存ファイル:
         remaining = len(paths) - 30
         if remaining > 0:
             lines.append(f"- ...他{remaining}件")
+        return "\n".join(lines)
+
+    def _experiment_summary(self, session: ResearchSession) -> str:
+        if not session.session_id:
+            return "なし"
+        store = ExperimentStore(self.config.experiments_path(session.session_id))
+        entries = store.read_all()
+        if not entries:
+            return "なし"
+        lines = []
+        for entry in entries[-10:]:
+            hypothesis = entry.hypothesis[:80]
+            metrics = entry.metrics if entry.metrics else {}
+            lines.append(
+                f"{entry.exp_id} [{entry.status}] {entry.name}: {hypothesis} metrics={metrics}"
+            )
         return "\n".join(lines)
 
 

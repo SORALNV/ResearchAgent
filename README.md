@@ -101,6 +101,8 @@ python main.py --workdir /tmp/research-agent-demo re scout "custom search query"
 python main.py --workdir /tmp/research-agent-demo re search "research agent harness citation"
 python main.py --workdir /tmp/research-agent-demo re papers
 python main.py --workdir /tmp/research-agent-demo re paper P-001
+python main.py --workdir /tmp/research-agent-demo re exps
+python main.py --workdir /tmp/research-agent-demo re task "EXP-001としてベースラインを実行"
 python main.py --workdir /tmp/research-agent-demo re eval
 python main.py --workdir /tmp/research-agent-demo re cost
 python main.py --workdir /tmp/research-agent-demo re doctor
@@ -150,6 +152,8 @@ Supported slash commands:
 - `/re search <query>`
 - `/re papers`
 - `/re paper <paper_id>`
+- `/re exps`
+- `/re task <text>`
 - `/re eval`
 - `/re cost`
 - `/re doctor`
@@ -342,6 +346,20 @@ The folder contains:
 - `research_brief.md`
 - `papers.jsonl` after literature search
 - `artifacts/` for future experiment logs, datasets, figures, diffs, and other research outputs
+- `experiments.jsonl` as the experiment ledger
+- `experiments/` for one folder per experiment
+- `paper/figures/` for cleaned figures intended for the final paper
+
+Experiment folders use this structure:
+
+```text
+experiments/EXP-001_short-slug/config.json
+experiments/EXP-001_short-slug/results/
+experiments/EXP-001_short-slug/figures/
+experiments/EXP-001_short-slug/notes.md
+```
+
+`/re exps` lists the experiment ledger, and `/re task <text>` runs one ad-hoc sub-agent task in RESEARCH or DONE mode.
 
 Do not overwrite an active session with `/re new`. The harness refuses to do so unless the existing session is stopped first. Keep old folders for audit and comparison; start a new research folder for each new topic or major run.
 

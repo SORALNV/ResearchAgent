@@ -73,6 +73,8 @@ class ResearchOrchestrator:
             "search": lambda: self.search_papers(str(command.args["query"])),
             "papers": self.list_papers,
             "paper": lambda: self.paper_detail(str(command.args["paper_id"])),
+            "exps": self.list_experiments,
+            "task": lambda: self.run_task(str(command.args["text"])),
             "eval": self.eval,
             "cost": self.cost,
             "doctor": self.doctor,
@@ -192,6 +194,8 @@ class ResearchOrchestrator:
         version_label, research_dir = self.config.allocate_research_dir(session.session_id, "untitled-research")
         session.version_label = version_label
         session.research_dir = str(research_dir)
+        self.config.experiments_dir(session.session_id).mkdir(parents=True, exist_ok=True)
+        (self.config.paper_dir(session.session_id) / "figures").mkdir(parents=True, exist_ok=True)
         self.store.save(session)
         self._record(
             session,
@@ -939,6 +943,83 @@ class ResearchOrchestrator:
                 confidence="high",
             )
         return "\n".join(lines)
+
+    def list_experiments(self) -> str:
+        from harness.experiments import ExperimentStore
+
+        session = self._require_session()
+        entries = ExperimentStore(self.config.experiments_path(session.session_id)).read_all()
+        self._record(
+            session,
+            event_type="experiments_list_requested",
+            main_agent_summary=f"{len(entries)}件の実験を表示",
+            confidence="high",
+        )
+        if not entries:
+            return "実験はまだ登録されていません。"
+        lines = []
+        for entry in entries:
+            hypothesis = entry.hypothesis[:60]
+            metrics = ", ".join(f"{key}={value}" for key, value in entry.metrics.items())
+            if not metrics:
+                metrics = "{}"
+            lines.append(
+                f"{entry.exp_id} [{entry.status}] {entry.name} | {hypothesis} | {metrics} | {entry.dir}"
+            )
+        return "\n".join(lines)
+
+    def run_task(self, text: str) -> str:
+        from harness.agent_runner import SubAgentCommandRunner, parse_approval_required
+
+        session = self.store.load()
+        if not session:
+            return "Run /re new first"
+        if not self.config.sub_agent_command:
+            return "実サブエージェント未設定のため /re task は使えません。"
+        if session.mode == Mode.PLANNING:
+            return "PLANNING中は /re task を使えません。/re start で研究を開始するか、壁打ちで計画を詰めてください。"
+        if session.mode not in {Mode.RESEARCH, Mode.DONE}:
+            return "現在のモードでは /re task を使えません。RESEARCHまたはDONEで実行してください。"
+
+        round_number = session.round_id + 1
+        runner = SubAgentCommandRunner(self.config)
+        sub_output = runner.run(session, round_number=round_number, task=text)
+        output = RoundOutput(
+            main_agent_summary=f"/re task: {text[:80]}",
+            subtask=text,
+            sub_agent_output=sub_output,
+            review_output=MockAgentRunner(self.config)._review_sub_agent_output(sub_output),
+            claude_consultation=None,
+            fresh_agent_output=None,
+            conversation_sessions=[],
+            proposed_operation=parse_approval_required(sub_output),
+            accepted_ideas=[f"task: {text[:120]}"],
+            rejected_ideas=[],
+            decision="採用: /re taskの単発実行",
+            confidence="mid" if "未確認" in sub_output else "high",
+            next_action="結果を確認し、必要なら次の /re task または /re paper",
+        )
+        previous_mode = session.mode
+        session.round_id = round_number
+        session.current_question = f"R{session.round_id}: /re task"
+        session.accepted_ideas.extend(output.accepted_ideas)
+        session.rejected_ideas.extend(output.rejected_ideas)
+        session.next_action = output.next_action
+        report = self._handle_round_output(session, output)
+        if (
+            previous_mode == Mode.DONE
+            and session.mode not in {Mode.APPROVAL_BLOCKED, Mode.DONE}
+        ):
+            session.transition_to(Mode.DONE)
+        self.store.save(session)
+        self._brief_writer(session).write(session)
+        preview = sub_output[:1200]
+        return (
+            f"{preview}\n\n"
+            f"保存先: {self.config.session_dir(session.session_id)}\n"
+            f"研究台帳: {self.config.research_ledger_path(session.session_id)}\n"
+            f"詳細レポートはjournal.jsonlとresearch_ledger.jsonlに記録済み。"
+        )
 
     def _run_until_blocked_or_done(self, session: ResearchSession) -> str:
         reports: list[str] = []

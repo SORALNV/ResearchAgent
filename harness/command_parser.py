@@ -11,7 +11,7 @@ ALIASES = {}
 def parse_research_command(text: str) -> Command:
     parts = shlex.split(text)
     if len(parts) < 2 or parts[0] != "/re":
-        raise ValueError("expected /re <new|plan|start|status|pause|resume|redirect|idea|search|papers|paper|eval|cost|doctor|runs|accept|revise|approve|reject|stop>")
+        raise ValueError("expected /re <new|plan|start|status|pause|resume|redirect|idea|search|papers|paper|exps|task|eval|cost|doctor|runs|accept|revise|approve|reject|stop>")
     prefix = parts[0]
     action = parts[1]
     if action == "new":
@@ -24,7 +24,7 @@ def parse_research_command(text: str) -> Command:
         return Command("enter_plan")
     name = ALIASES.get(action, action)
     rest = parts[2:]
-    if action in {"new", "redirect", "idea", "search"}:
+    if action in {"new", "redirect", "idea", "search", "task"}:
         if not rest:
             raise ValueError(f"/re {action} requires <text>")
         key = "query" if action == "search" else "text"
@@ -49,7 +49,7 @@ def parse_research_command(text: str) -> Command:
         if len(rest) < 2:
             raise ValueError("/re reject requires <id> <reason>")
         return Command("reject", {"approval_id": rest[0], "reason": " ".join(rest[1:])})
-    if action in {"start", "status", "pause", "resume", "stop", "papers", "eval", "cost", "doctor", "runs"}:
+    if action in {"start", "status", "pause", "resume", "stop", "papers", "exps", "eval", "cost", "doctor", "runs"}:
         if rest:
             raise ValueError(f"/re {action} does not accept extra arguments")
         return Command(name)

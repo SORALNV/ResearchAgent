@@ -280,6 +280,14 @@ class DiscordBotAdapter:
         async def re_paper(interaction: discord.Interaction, paper_id: str) -> None:
             await _handle_command(interaction, Command("paper", {"paper_id": paper_id}))
 
+        @re.command(name="exps", description="実験一覧を表示")
+        async def re_exps(interaction: discord.Interaction) -> None:
+            await _handle_command(interaction, Command("exps"))
+
+        @re.command(name="task", description="単発の実験・作業タスクを実行")
+        async def re_task(interaction: discord.Interaction, text: str) -> None:
+            await _handle_command(interaction, Command("task", {"text": text}))
+
         @re.command(name="cost", description="API呼び出し数や推定トークンなどのコスト状況を表示します。")
         async def re_cost(interaction: discord.Interaction) -> None:
             await _handle_command(interaction, Command("cost"))

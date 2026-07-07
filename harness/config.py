@@ -136,6 +136,8 @@ class HarnessConfig:
         folder = self.research_archive_path / f"{version_label}_{session_id}_{slug}"
         folder.mkdir(parents=True, exist_ok=False)
         (folder / "artifacts").mkdir()
+        (folder / "experiments").mkdir()
+        (folder / "paper" / "figures").mkdir(parents=True)
         return version_label, folder
 
     def session_state_path(self, session_id: str) -> Path:
@@ -155,6 +157,15 @@ class HarnessConfig:
 
     def research_ledger_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "research_ledger.jsonl"
+
+    def experiments_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "experiments.jsonl"
+
+    def experiments_dir(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "experiments"
+
+    def paper_dir(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "paper"
 
     def artifacts_dir(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "artifacts"

@@ -292,6 +292,10 @@ class DiscordBotAdapter:
         async def re_task(interaction: discord.Interaction, text: str) -> None:
             await _handle_command(interaction, Command("task", {"text": text}))
 
+        @re.command(name="remember", description="エージェントの長期記憶に保存")
+        async def re_remember(interaction: discord.Interaction, text: str) -> None:
+            await _handle_command(interaction, Command("remember", {"text": text}))
+
         @re.command(name="cost", description="API呼び出し数や推定トークンなどのコスト状況を表示します。")
         async def re_cost(interaction: discord.Interaction) -> None:
             await _handle_command(interaction, Command("cost"))

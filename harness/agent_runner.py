@@ -221,6 +221,8 @@ class SubAgentCommandRunner:
         papers_path = self.config.papers_path(session.session_id)
         papers_note = str(papers_path) if papers_path.exists() else "なし"
         experiment_summary = self._experiment_summary(session)
+        from harness.memory import AgentMemory
+        memory_digest = AgentMemory(self.config.agent_memory_path).digest(max_chars=1200)
         return f"""あなたは研究ハーネスのsubエージェントです。
 単一タスクだけを実行し、結果を構造化して返してください。
 
@@ -254,6 +256,9 @@ artifacts内の既存ファイル:
 
 実験台帳サマリ:
 {experiment_summary}
+
+長期記憶（過去の研究・ユーザーの好み）:
+{memory_digest}
 
 確定済みPLAN:
 {plan_text}

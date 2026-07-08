@@ -49,6 +49,7 @@ class HarnessConfig:
     max_command_seconds: int = 300
     paper_provider: str = "fake"
     research_archive_dir: Path | None = None
+    agent_memory_dir: Path | None = None
 
     @classmethod
     def from_env(
@@ -64,6 +65,10 @@ class HarnessConfig:
         archive_path = Path(archive_raw).expanduser()
         if not archive_path.is_absolute():
             archive_path = root / archive_path
+        memory_raw = os.getenv("AGENT_MEMORY_DIR", "agent_memory")
+        memory_path = Path(memory_raw).expanduser()
+        if not memory_path.is_absolute():
+            memory_path = root / memory_path
         return cls(
             project_root=root,
             discord_bot_token=os.getenv("DISCORD_BOT_TOKEN") or None,
@@ -94,6 +99,7 @@ class HarnessConfig:
             max_command_seconds=_int_env("MAX_COMMAND_SECONDS", 300),
             paper_provider=os.getenv("PAPER_PROVIDER", "fake"),
             research_archive_dir=archive_path,
+            agent_memory_dir=memory_path,
         )
 
     @property
@@ -116,6 +122,10 @@ class HarnessConfig:
     @property
     def research_archive_path(self) -> Path:
         return self.research_archive_dir or (self.project_root / "research_runs")
+
+    @property
+    def agent_memory_path(self) -> Path:
+        return self.agent_memory_dir or (self.project_root / "agent_memory")
 
     @property
     def legacy_sessions_dir(self) -> Path:

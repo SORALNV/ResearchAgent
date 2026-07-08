@@ -96,6 +96,7 @@ python main.py --workdir /tmp/research-agent-demo re pause
 python main.py --workdir /tmp/research-agent-demo re resume
 python main.py --workdir /tmp/research-agent-demo re redirect "制約や方針変更"
 python main.py --workdir /tmp/research-agent-demo re idea "追加アイデア"
+python main.py --workdir /tmp/research-agent-demo re remember "恒久的に覚えてほしいこと"
 python main.py --workdir /tmp/research-agent-demo re scout
 python main.py --workdir /tmp/research-agent-demo re scout "custom search query"
 python main.py --workdir /tmp/research-agent-demo re search "research agent harness citation"
@@ -374,6 +375,20 @@ experiments/EXP-001_short-slug/notes.md
 Do not overwrite an active session with `/re new`. The harness refuses to do so unless the existing session is stopped first. Keep old folders for audit and comparison; start a new research folder for each new topic or major run.
 
 Use `/re runs` to list archived research folders.
+
+## Agent Memory
+
+The harness keeps long-term agent memory next to the research archive by default:
+
+```text
+agent_memory/
+  MEMORY.md
+  entries/
+```
+
+`MEMORY.md` is the index. Each saved memory has one bullet there and a corresponding markdown file under `entries/`. Use `/re remember <text>` to manually store durable preferences, environment constraints, or decisions. During planning, the PLAN agent may also emit `REMEMBER: <1行>` inside a `PLAN_UPDATE:` block when it learns a fact that should persist across future research topics.
+
+When `/re stop` finalizes a session, the harness automatically stores one session summary containing the goal, criteria, novelty status, round count, recent experiments, next action, and research folder path. The memory digest is injected into the PLAN agent's initial prompt and the research sub-agent prompt. The memory directory can be overridden with `AGENT_MEMORY_DIR`; otherwise it defaults to `agent_memory/` under the project root.
 
 ## Doctor
 

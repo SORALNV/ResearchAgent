@@ -87,6 +87,7 @@ class ResearchSession:
     cost: CostState = field(default_factory=CostState)
     paused_from: Mode | None = None
     completed_reason: str | None = None
+    memory_saved: bool = False
 
     @classmethod
     def new(cls, goal: str, project_name: str = "Research Harness MVP") -> "ResearchSession":
@@ -165,6 +166,7 @@ class ResearchSession:
             cost=CostState(**data.get("cost", {})),
             paused_from=Mode(data["paused_from"]) if data.get("paused_from") else None,
             completed_reason=data.get("completed_reason"),
+            memory_saved=bool(data.get("memory_saved", False)),
         )
 
 

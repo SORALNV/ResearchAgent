@@ -60,6 +60,7 @@ class ResearchOrchestrator:
             "resume": self.resume,
             "redirect": lambda: self.redirect(str(command.args["text"])),
             "idea": lambda: self.idea(str(command.args["text"])),
+            "remember": lambda: self.remember(str(command.args["text"])),
             "accept": lambda: self.accept_phase_gate(str(command.args["gate_id"])),
             "revise": lambda: self.revise_phase_gate(
                 str(command.args["gate_id"]),
@@ -651,6 +652,17 @@ class ResearchOrchestrator:
                 phase_gate=review_gate.__dict__,
                 report_review=report_review,
             )
+        if not session.memory_saved:
+            memory_path = self._save_session_memory_summary(session)
+            session.memory_saved = True
+            self.store.save(session)
+            self._record(
+                session,
+                event_type="memory_saved",
+                decision="session summary saved",
+                confidence="high",
+                files_changed=[str(memory_path)],
+            )
         self._record(
             session,
             event_type="session_ended",
@@ -667,6 +679,65 @@ class ResearchOrchestrator:
             ],
         )
         return report
+
+    def remember(self, text: str) -> str:
+        from harness.memory import AgentMemory
+
+        session = self.store.load()
+        path = AgentMemory(self.config.agent_memory_path).save(text[:30], text)
+        if session:
+            self._record(
+                session,
+                event_type="memory_saved",
+                decision="manual remember",
+                confidence="high",
+                files_changed=[str(path)],
+            )
+        return f"記憶しました: {text[:80]}"
+
+    def _save_session_memory_summary(self, session: ResearchSession) -> Path:
+        from harness.memory import AgentMemory
+
+        title = (session.research_goal or session.session_id)[:40]
+        experiments = self._recent_experiments_for_memory(session)
+        body = "\n".join(
+            [
+                f"session_id: {session.session_id}",
+                f"goal: {session.research_goal}",
+                "goal_criteria:",
+                *([f"- {item}" for item in session.goal_criteria] or ["- 未確定"]),
+                f"novelty_status: {session.planning_scout.get('novelty_status', '未確認')}",
+                f"rounds: {session.round_id}",
+                "recent_experiments:",
+                *(experiments or ["- なし"]),
+                f"next_action: {session.next_action}",
+                f"research_dir: {session.research_dir}",
+            ]
+        )
+        return AgentMemory(self.config.agent_memory_path).save(title=title, body=body)
+
+    def _recent_experiments_for_memory(self, session: ResearchSession) -> list[str]:
+        import json
+
+        path = self.config.experiments_path(session.session_id)
+        if not path.exists():
+            return []
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        items: list[str] = []
+        for line in lines[-3:]:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            items.append(
+                "- {exp_id}: {name} status={status} metrics={metrics}".format(
+                    exp_id=item.get("exp_id", ""),
+                    name=item.get("name", ""),
+                    status=item.get("status", ""),
+                    metrics=item.get("metrics", {}),
+                )
+            )
+        return items
 
     def search_papers(self, query: str) -> str:
         session = self._require_session()
@@ -1619,6 +1690,7 @@ class ResearchOrchestrator:
             "方法": 0,
             "確認事項": 0,
             "解決": 0,
+            "記憶": 0,
         }
         for item in updates.get("goal_criteria", []):
             if item not in session.goal_criteria:
@@ -1640,6 +1712,23 @@ class ResearchOrchestrator:
                 if not (item == resolved or item.startswith(resolved) or resolved.startswith(item))
             ]
             counts["解決"] += before - len(session.open_questions)
+        remembers = updates.get("remembers", [])
+        if remembers:
+            from harness.memory import AgentMemory
+            from harness.state import utc_timestamp
+
+            memory = AgentMemory(self.config.agent_memory_path)
+            for item in remembers:
+                body = f"{item}\n\nsession_id: {session.session_id}\nsaved_at: {utc_timestamp()}"
+                path = memory.save(title=item[:30], body=body)
+                counts["記憶"] += 1
+                self._record(
+                    session,
+                    event_type="memory_saved",
+                    decision="PLAN_UPDATE REMEMBER",
+                    confidence="high",
+                    files_changed=[str(path)],
+                )
         labels = [
             f"{label}+{count}"
             for label, count in counts.items()

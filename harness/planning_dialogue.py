@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from harness.config import HarnessConfig, effective_model_name
+from harness.memory import AgentMemory
 from harness.state import ResearchSession
 
 
@@ -16,6 +17,7 @@ PLAN_UPDATE_KEYS = {
     "METHOD": "research_methods",
     "OPEN_QUESTION": "open_questions",
     "RESOLVED_QUESTION": "resolved_questions",
+    "REMEMBER": "remembers",
 }
 
 
@@ -34,6 +36,7 @@ def parse_plan_update(text: str) -> tuple[str, dict[str, list[str]]]:
         "research_methods": [],
         "open_questions": [],
         "resolved_questions": [],
+        "remembers": [],
     }
     for line in lines[start_index + 1 :]:
         stripped = line.strip()
@@ -336,6 +339,7 @@ class PlanningDialogueRunner:
         research_methods = _render_items(session.research_methods, "未確定")
         open_questions = _render_items(session.open_questions, "なし")
         summary_block = f"\nこれまでの会話の要約:\n{dialogue_summary}\n" if dialogue_summary else ""
+        memory_digest = AgentMemory(self.config.agent_memory_path).digest()
         return f"""あなたはResearchAgentのPLANNING壁打ち担当です。
 
 設計思想:
@@ -370,6 +374,7 @@ class PlanningDialogueRunner:
 - ユーザーとの合意が取れた項目、またはユーザーが明示指定した方法・条件があれば、返答の最後にPLAN_UPDATEブロックで記録する。合意していないものは書かない
 - PLAN_UPDATEブロックは字数制限の外とする
 - あなた側で研究を進める上で明確にしておきたい点があればOPEN_QUESTIONとして記録し、会話の中でユーザーに聞く。解決したらRESOLVED_QUESTIONで消す
+- 会話の中でユーザーの恒久的な好み・環境制約・重要な決定を知ったら、PLAN_UPDATEブロックに REMEMBER: <1行> を含めてよい。本当に今後も使う事実だけを書く
 
 PLAN_UPDATE形式:
 PLAN_UPDATE:
@@ -377,6 +382,7 @@ GOAL_CRITERIA: <ゴール条件1行>
 METHOD: <研究方法1行>
 OPEN_QUESTION: <確認したい点1行>
 RESOLVED_QUESTION: <解決した確認事項の本文>
+REMEMBER: <今後も使う恒久的な記憶1行>
 
 研究ゴール:
 {session.research_goal}
@@ -388,6 +394,9 @@ RESOLVED_QUESTION: <解決した確認事項の本文>
 {research_methods}
 未解決の確認事項:
 {open_questions}
+
+長期記憶（過去の研究・ユーザーの好み）:
+{memory_digest}
 
 Soraの入力:
 {user_text}{summary_block}

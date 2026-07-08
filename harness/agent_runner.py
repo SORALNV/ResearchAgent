@@ -207,12 +207,18 @@ class SubAgentCommandRunner:
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
+                *self._network_access_args(),
                 "--ephemeral",
                 "--color",
                 "never",
                 "-",
             ]
         return parts
+
+    def _network_access_args(self) -> list[str]:
+        if self.config.research_network_access:
+            return ["-c", "sandbox_workspace_write.network_access=true"]
+        return []
 
     def _build_prompt(self, session: ResearchSession, round_number: int, task: str) -> str:
         plan_path = self.config.plan_path(session.session_id)
@@ -225,12 +231,14 @@ class SubAgentCommandRunner:
         memory_digest = AgentMemory(self.config.agent_memory_path).digest(max_chars=1200)
         return f"""あなたは研究ハーネスのsubエージェントです。
 単一タスクだけを実行し、結果を構造化して返してください。
+作業規約は研究フォルダ直下の AGENTS.md に記載されている（自動で読み込まれる）。矛盾時はAGENTS.mdより本プロンプトを優先。
 
 制約:
 - 作業場所は研究フォルダ内に限定する: {session.research_dir}
 - 成果物はすべて研究フォルダ内に置く。ラウンドごとの作業メモは artifacts/ 配下に残す
 - ファイル削除、外部投稿、git push、秘密情報送信は禁止
-- sudo/chmod/chown、ファイル削除、外部投稿、git push、秘密情報送信、課金API呼び出しは禁止
+- sudo/chmod/chown、ファイル削除、外部投稿、git push、秘密情報送信は禁止
+- plan.md または研究方法に明記された実験用APIの呼び出し（例: Gemini API via Google ADC認証）は実行してよい。新規の課金リソース契約、明らかに高額な呼び出し、記載のない課金APIは APPROVAL_REQUIRED で報告する
 - 危険操作が必要なら実行せず、次の形式で1行だけ報告する:
   APPROVAL_REQUIRED: operation=<操作>; reason=<理由>; impact=<影響>; dry_run_result=<実行していない確認結果>
 - 大量ファイル生成や長時間コマンドが必要なら、その必要性を報告だけして実行しない

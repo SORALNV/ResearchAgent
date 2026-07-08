@@ -13,6 +13,13 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.lower() in {"1", "true"}
+
+
 MODEL_ALIASES = {
     "5.3CodexSpark": "gpt-5.3-codex-spark",
     "5.4mini": "gpt-5.4-mini",
@@ -47,6 +54,7 @@ class HarnessConfig:
     max_total_tokens: int = 0
     max_agent_calls: int = 0
     max_command_seconds: int = 300
+    research_network_access: bool = False
     paper_provider: str = "fake"
     research_archive_dir: Path | None = None
     agent_memory_dir: Path | None = None
@@ -97,6 +105,7 @@ class HarnessConfig:
             max_total_tokens=_int_env("MAX_TOTAL_TOKENS", 0),
             max_agent_calls=_int_env("MAX_AGENT_CALLS", 0),
             max_command_seconds=_int_env("MAX_COMMAND_SECONDS", 300),
+            research_network_access=_bool_env("RESEARCH_NETWORK_ACCESS", False),
             paper_provider=os.getenv("PAPER_PROVIDER", "fake"),
             research_archive_dir=archive_path,
             agent_memory_dir=memory_path,

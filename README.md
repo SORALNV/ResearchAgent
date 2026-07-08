@@ -299,12 +299,16 @@ codex exec -m {RESEARCH_AGENT_MODEL} --cd {research_dir} --skip-git-repo-check -
 
 The main/review/fresh roles remain controlled by the harness. This keeps state transitions, approval gates, journal logging, and Discord reports stable while testing one real role at a time.
 
+Set `RESEARCH_NETWORK_ACCESS=1` when experiments need Web/API access from the Codex sandbox, such as Gemini API calls via Google ADC or cloud GPU job submission. With `SUB_AGENT_COMMAND=codex`, the harness adds `-c sandbox_workspace_write.network_access=true` to the Codex command.
+
 When `SUB_AGENT_COMMAND` is set, research rounds run in real mode:
 
 - the round-1 dummy dangerous-operation demo and Claude stub are disabled
 - round tasks are staged: round 1 prepares data/code per `plan.md` (`artifacts/round1_notes.md`), middle rounds run experiments/analysis (`artifacts/roundN_notes.md`), and the final round writes a figure-rich markdown report to `artifacts/report.md`
 - the sub prompt asks for matplotlib figures under `artifacts/figures/*.png` (markdown tables or mermaid as fallback), `[P-xxx]` citations for paper-backed claims, and lists existing `artifacts/` files plus `papers.jsonl` for continuity
 - real research rounds can take longer than the 300s default; set `MAX_COMMAND_SECONDS=1800` in `.env` for real runs
+
+Calls to experiment APIs explicitly written in `plan.md` or the research methods are allowed. New paid resource contracts, clearly expensive calls, or unlisted paid APIs must be reported as `APPROVAL_REQUIRED`.
 
 If a real sub-agent needs a dangerous operation such as `sudo`, `chmod`, `chown`, deletion, external posting, or `git push`, it must not execute it directly. It should report one line:
 
@@ -372,6 +376,20 @@ experiments/EXP-001_short-slug/notes.md
 
 `/re exps` lists the experiment ledger, and `/re task <text>` runs one ad-hoc sub-agent task in RESEARCH or DONE mode.
 
+For long-running jobs such as cloud GPU experiments, use an asynchronous pattern: submit the job, record the job ID in `experiments/EXP-xxx_*/notes.md` and `experiments.jsonl`, then collect results in a later round. Do not block a research round waiting indefinitely for remote work.
+
+## AGENTS.md Generation
+
+The harness automatically writes `AGENTS.md` in each research folder. It is generated from the current session state and is intended as the strongest handoff document for Codex sub-agents.
+
+It is written:
+
+- immediately after `plan.md` is finalized at `/re start`
+- before `/re task`
+- before `/re paper`
+
+The file summarizes the research goal, criteria, methods, open questions, file layout, experiment rules, paper-writing rules, and safety policy. Manual edits are overwritten when the generated content changes.
+
 Do not overwrite an active session with `/re new`. The harness refuses to do so unless the existing session is stopped first. Keep old folders for audit and comparison; start a new research folder for each new topic or major run.
 
 Use `/re runs` to list archived research folders.
@@ -400,6 +418,9 @@ Use `/re doctor` to check the local harness setup. It reports:
 - paper provider
 - Codex CLI availability
 - configured `SUB_AGENT_COMMAND`
+- `RESEARCH_NETWORK_ACCESS` status
+- `gcloud` CLI availability
+- Google ADC status via `gcloud auth application-default print-access-token`
 
 ## Journal
 

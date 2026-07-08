@@ -21,7 +21,10 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
         DoctorCheck("important_channel", bool(config.discord_important_channel_id), config.discord_important_channel_id or "未設定"),
         DoctorCheck("log_channel", bool(config.discord_log_channel_id), config.discord_log_channel_id or "未設定"),
         DoctorCheck("paper_provider", config.paper_provider in {"fake", "arxiv"}, config.paper_provider),
+        DoctorCheck("research_network_access", True, "有効" if config.research_network_access else "無効"),
         _command_check("codex", ["codex", "--version"]),
+        _command_check("gcloud", ["gcloud", "--version"]),
+        _gcloud_adc_check(),
     ]
     if config.sub_agent_command:
         executable = config.sub_agent_command.split()[0]
@@ -61,3 +64,19 @@ def _command_check(name: str, command: list[str]) -> DoctorCheck:
     detail = output[0] if output else f"returncode={completed.returncode}"
     return DoctorCheck(name, completed.returncode == 0, detail)
 
+
+def _gcloud_adc_check(command_name: str = "gcloud") -> DoctorCheck:
+    if not shutil.which(command_name):
+        return DoctorCheck("gcloud_adc", False, "ADC未設定（gcloud auth application-default login が必要）")
+    try:
+        completed = subprocess.run(
+            [command_name, "auth", "application-default", "print-access-token"],
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return DoctorCheck("gcloud_adc", False, "ADC未設定（gcloud auth application-default login が必要）")
+    return DoctorCheck("gcloud_adc", completed.returncode == 0, "OK" if completed.returncode == 0 else "ADC未設定（gcloud auth application-default login が必要）")

@@ -339,6 +339,7 @@ class ResearchOrchestrator:
             )
             return message
         plan_path = self._write_plan_md(session)
+        agents_path = self._write_agents_md(session)
         session.transition_to(Mode.RESEARCH)
         session.phase = "research"
         session.current_question = "MVPのE2E研究ループをMockAgentRunnerで通す"
@@ -352,7 +353,7 @@ class ResearchOrchestrator:
             commands_run=["/re start"],
             main_agent_summary="/start accepted",
             decision="RESEARCHへ移行",
-            files_changed=[str(plan_path)],
+            files_changed=[str(plan_path), str(agents_path)],
         )
         return self._run_until_blocked_or_done(session)
 
@@ -1143,6 +1144,7 @@ class ResearchOrchestrator:
             "既に thesis.md がある場合は全文を読み、指示に沿って改訂する"
             "（無指示なら最新の実験結果を反映して更新）。"
         )
+        self._write_agents_md(session)
         if instruction.strip():
             task += f"\nユーザーからの改訂指示: {instruction.strip()}"
 
@@ -1204,6 +1206,8 @@ class ResearchOrchestrator:
             return "PLANNING中は /re task を使えません。/re start で研究を開始するか、壁打ちで計画を詰めてください。"
         if session.mode not in {Mode.RESEARCH, Mode.DONE}:
             return "現在のモードでは /re task を使えません。RESEARCHまたはDONEで実行してください。"
+
+        self._write_agents_md(session)
 
         round_number = session.round_id + 1
         runner = SubAgentCommandRunner(self.config)
@@ -1467,6 +1471,71 @@ class ResearchOrchestrator:
             files_changed=[str(path)],
         )
         return path
+
+    def _write_agents_md(self, session: ResearchSession) -> Path:
+        path = self.config.session_dir(session.session_id) / "AGENTS.md"
+        content = self._render_agents_md(session) + "\n"
+        if path.exists() and path.read_text(encoding="utf-8") == content:
+            return path
+        path.write_text(content, encoding="utf-8")
+        self._record(
+            session,
+            event_type="agents_md_updated",
+            decision="AGENTS.md updated for research handoff",
+            confidence="high",
+            files_changed=[str(path)],
+        )
+        return path
+
+    def _render_agents_md(self, session: ResearchSession) -> str:
+        scout = session.planning_scout or {}
+        primary = scout.get("primary_comparison") or "未確定"
+        novelty = scout.get("novelty_status") or "未確定"
+        if isinstance(primary, dict):
+            primary = ", ".join(f"{key}={value}" for key, value in sorted(primary.items())) or "未確定"
+
+        def bullet_values(values: list[str], empty: str = "未確定") -> str:
+            return "\n".join(f"- {value}" for value in values) if values else f"- {empty}"
+
+        return f"""# Research Session AGENTS.md（自動生成。手動編集は上書きされる）
+
+## 研究概要
+- goal: {session.research_goal or "未確定"}
+- goal_criteria:
+{bullet_values(session.goal_criteria)}
+- research_methods:
+{bullet_values(session.research_methods)}
+- open_questions:
+{bullet_values(session.open_questions, "なし")}
+- novelty_status: {novelty}
+- primary_comparison: {primary}
+
+## ファイル案内
+- plan.md（確定プラン）
+- papers.jsonl（文献。主張には[P-xxx]出典）
+- experiments.jsonl（実験台帳）
+- dialogue.jsonl
+- journal.jsonl
+- research_brief.md
+- paper/thesis.md
+
+## 実験規約
+- 1実験=1フォルダ experiments/EXP-xxx_<slug>/（config.json, results/, figures/, notes.md）
+- 実験の開始・完了時に experiments.jsonl に1行JSONを追記/更新する
+- experiments.jsonl のフィールド: exp_id, name, hypothesis, status, round_id, metrics, dir, created_at, updated_at
+- 論文用の清書図は paper/figures/ へコピーする
+- 長時間ジョブ（クラウドGPU等）は投行→ジョブIDをnotes.mdとexperiments.jsonlに記録→後続ラウンドで結果回収、の非同期パターンを使う
+
+## 論文規約
+- paper/thesis.md の構成: タイトル / 概要 / 序論 / 関連研究 / 提案手法 / 実験 / 考察 / 結論 / 参考文献
+- 図はpaper/相対のfigures/xxx.pngを使う
+- 実測値のみ記載し、未確認は明示する
+- 文献に基づく主張は[P-xxx]引用+URLを付ける
+
+## 安全規約
+- sudo/chmod/chown、ファイル削除、外部投稿、git push、秘密情報送信は禁止
+- 危険操作は APPROVAL_REQUIRED: operation=...; reason=...; impact=...; dry_run_result=... の1行報告のみ
+- plan.mdに明記された実験用API（例: Gemini API via ADC）は実行してよい。新規の課金契約や高額と推定される操作は承認必須"""
 
     def _render_plan_md(self, session: ResearchSession) -> str:
         scout = session.planning_scout or {}

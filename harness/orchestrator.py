@@ -73,6 +73,7 @@ class ResearchOrchestrator:
             "search": lambda: self.search_papers(str(command.args["query"])),
             "papers": self.list_papers,
             "paper": lambda: self.paper_detail(str(command.args["paper_id"])),
+            "paper_write": lambda: self.write_paper(str(command.args.get("instruction", ""))),
             "exps": self.list_experiments,
             "task": lambda: self.run_task(str(command.args["text"])),
             "eval": self.eval,
@@ -255,8 +256,18 @@ class ResearchOrchestrator:
 
     def plan_text(self, text: str, attachments: list[str] | None = None) -> str:
         session = self._require_session()
+        if session.mode == Mode.APPROVAL_BLOCKED:
+            return "承認待ちのため通常メッセージには応答できません。先に /re approve または /re reject で判断してください。"
+        if session.mode in {Mode.RESEARCH, Mode.DONE}:
+            context_text = self._research_dialogue_context(session, text)
+            return self.discuss(
+                context_text,
+                attachments=attachments,
+                event_type="research_dialogue_completed",
+                user_instruction=text,
+            )
         if session.mode != Mode.PLANNING:
-            return f"/re plan はPLANNING中だけ有効です。現在: {session.mode.value}"
+            return f"通常メッセージでの相談はPLANNING/RESEARCH/DONE中だけ有効です。現在: {session.mode.value}"
         if session.research_goal == "未設定":
             session.research_goal = text
             session.current_question = "研究開始前の対話型要件定義"
@@ -287,6 +298,20 @@ class ResearchOrchestrator:
 
     def start(self) -> str:
         session = self._require_session()
+        if session.mode == Mode.DONE:
+            session.transition_to(Mode.RESEARCH)
+            session.completed_reason = None
+            session.round_budget = session.round_id + self.config.max_rounds
+            session.next_action = "追加RESEARCHラウンドを再開する"
+            self.store.save(session)
+            self._record(
+                session,
+                event_type="research_resumed",
+                commands_run=["/re start"],
+                decision=f"追加ラウンドを再開: round_budget={session.round_budget}",
+                confidence="high",
+            )
+            return self._run_until_blocked_or_done(session)
         if session.mode != Mode.PLANNING:
             return f"/re start はPLANNING中だけ有効です。現在: {session.mode.value}"
         if self._pending_phase_gate(session):
@@ -317,6 +342,8 @@ class ResearchOrchestrator:
         session.phase = "research"
         session.current_question = "MVPのE2E研究ループをMockAgentRunnerで通す"
         session.next_action = "RESEARCHラウンドを開始する"
+        if not session.round_budget:
+            session.round_budget = self.config.max_rounds
         self.store.save(session)
         self._record(
             session,
@@ -344,7 +371,7 @@ class ResearchOrchestrator:
         return (
             f"モード: {session.mode.value}\n"
             f"現在の問い: {session.current_question or '未設定'}\n"
-            f"進捗: round {session.round_id}/{self.config.max_rounds}\n"
+            f"進捗: round {session.round_id}/{session.round_budget or self.config.max_rounds}\n"
             f"次の一手: {session.next_action or '未設定'}\n"
             f"承認待ち: {', '.join(pending) if pending else 'なし'}"
         )
@@ -387,11 +414,19 @@ class ResearchOrchestrator:
         self._save_journal_and_brief(session, "idea反映", user_instruction=text)
         return f"ideaを記録しました。\n{text}"
 
-    def discuss(self, text: str, attachments: list[str] | None = None) -> str:
+    def discuss(
+        self,
+        text: str,
+        attachments: list[str] | None = None,
+        event_type: str = "planning_dialogue_completed",
+        user_instruction: str | None = None,
+    ) -> str:
         session = self._require_session()
-        if session.mode != Mode.PLANNING:
-            return f"plan中の通常メッセージはPLANNING中だけ有効です。現在: {session.mode.value}"
-        session.accepted_ideas.append(f"Sora discuss: {text}")
+        if session.mode not in {Mode.PLANNING, Mode.RESEARCH, Mode.DONE}:
+            return f"通常メッセージでの相談はPLANNING/RESEARCH/DONE中だけ有効です。現在: {session.mode.value}"
+        session.accepted_ideas.append(
+            f"Sora discuss: {user_instruction if user_instruction is not None else text}"
+        )
         search_callback = lambda query: self._planning_search_for_dialogue(session, query)
         result = self.planning_dialogue.converse(
             session,
@@ -411,8 +446,11 @@ class ResearchOrchestrator:
         response = display_text + self._format_planning_citation_footer(session, display_text, result.searches)
         if update_summary:
             response = response.rstrip() + f"\n\n📌 プラン更新: {update_summary}"
-        session.accepted_ideas.append(f"PLANNING dialogue: {display_text[:500]}")
-        session.next_action = "通常メッセージで継続し、方針が固まったら /re start"
+        session.accepted_ideas.append(f"{session.mode.value} dialogue: {display_text[:500]}")
+        if session.mode == Mode.PLANNING:
+            session.next_action = "通常メッセージで継続し、方針が固まったら /re start"
+        else:
+            session.next_action = "必要なら /re task、/re paper、/re start で続行"
         self.store.save(session)
         brief = self._brief_writer(session).write(session)
         if update_summary:
@@ -425,8 +463,8 @@ class ResearchOrchestrator:
             )
         self._record(
             session,
-            event_type="planning_dialogue_completed",
-            user_instruction=text,
+            event_type=event_type,
+            user_instruction=user_instruction if user_instruction is not None else text,
             main_agent_summary=display_text,
             decision="Soraの返答待ち",
             confidence="mid",
@@ -968,6 +1006,121 @@ class ResearchOrchestrator:
             )
         return "\n".join(lines)
 
+    def _research_dialogue_context(self, session: ResearchSession, text: str) -> str:
+        import json
+        from pathlib import Path
+
+        ledger_items: list[str] = []
+        ledger_path = self.config.research_ledger_path(session.session_id)
+        if ledger_path.exists():
+            for line in ledger_path.read_text(encoding="utf-8").splitlines()[-20:]:
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                node_id = str(item.get("node_id") or item.get("id") or "")
+                hypothesis = str(item.get("hypothesis") or item.get("subtask") or "")[:100]
+                result = str(item.get("result") or item.get("decision") or item.get("main_agent_summary") or "")[:100]
+                ledger_items.append(f"{node_id}: hypothesis={hypothesis} result={result}")
+        ledger_summary = " / ".join(ledger_items[-2:]) if ledger_items else "なし"
+
+        exp_items: list[str] = []
+        exp_path = Path(session.research_dir) / "experiments.jsonl"
+        if exp_path.exists():
+            for line in exp_path.read_text(encoding="utf-8").splitlines()[-20:]:
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                exp_items.append(
+                    f"{item.get('exp_id', 'EXP-???')} [{item.get('status', 'unknown')}] {item.get('name', '')}"
+                )
+        exp_summary = " / ".join(exp_items[-3:]) if exp_items else "なし"
+        return (
+            "[研究状況]\n"
+            f"round={session.round_id}, mode={session.mode.value}, "
+            f"直近ledger: {ledger_summary}, 実験台帳: {exp_summary}。"
+            "この状況を踏まえ、Soraの質問・指示に助手として答える。"
+            "実験の実行が必要な提案をする場合は「/re task <内容>」、"
+            "論文更新は「/re paper」、追加ラウンドは「/re start」を案内する。\n\n"
+            f"{text}"
+        )
+
+    def write_paper(self, instruction: str) -> str:
+        from harness.agent_runner import SubAgentCommandRunner, parse_approval_required
+
+        session = self.store.load()
+        if not session:
+            return "Run /re new first"
+        if not self.config.sub_agent_command:
+            return "実サブエージェント未設定のため /re paper は使えません。"
+        if session.mode == Mode.APPROVAL_BLOCKED:
+            return "承認待ちのため /re paper は使えません。先に /re approve または /re reject で判断してください。"
+
+        task = (
+            "`paper/thesis.md` を執筆・更新する。構成: タイトル / 概要 / "
+            "1. 序論(背景・目的・ゴール条件) / 2. 関連研究(papers.jsonlの文献を[P-xxx]引用、URL付き) / "
+            "3. 提案手法・アプローチ / 4. 実験(experiments.jsonlの各実験を小節化し、config・結果・図を記載) / "
+            "5. 考察 / 6. 結論と今後の課題 / 参考文献。\n"
+            "図は `figures/` 相対パス（paper/figures/ にある図）で埋め込む。"
+            "実験結果の数値は experiments/ 配下の results/ から実測値を引用し、根拠のない数値を書かない。"
+            "未確認事項は明示。日本語で書く。\n"
+            "既に thesis.md がある場合は全文を読み、指示に沿って改訂する"
+            "（無指示なら最新の実験結果を反映して更新）。"
+        )
+        if instruction.strip():
+            task += f"\nユーザーからの改訂指示: {instruction.strip()}"
+
+        round_number = session.round_id + 1
+        runner = SubAgentCommandRunner(self.config)
+        sub_output = runner.run(session, round_number=round_number, task=task)
+        output = RoundOutput(
+            main_agent_summary=f"/re paper: {instruction[:80] or 'latest results'}",
+            subtask=task,
+            sub_agent_output=sub_output,
+            review_output=MockAgentRunner(self.config)._review_sub_agent_output(sub_output),
+            claude_consultation=None,
+            fresh_agent_output=None,
+            conversation_sessions=[],
+            proposed_operation=parse_approval_required(sub_output),
+            accepted_ideas=[f"paper: {instruction[:120] or 'update thesis.md'}"],
+            rejected_ideas=[],
+            decision="採用: /re paperの論文執筆・改訂",
+            confidence="mid" if "未確認" in sub_output else "high",
+            next_action="論文を確認し、必要なら /re paper <改訂指示> または /re task",
+        )
+        session.round_id = round_number
+        session.current_question = f"R{session.round_id}: /re paper"
+        session.accepted_ideas.extend(output.accepted_ideas)
+        session.rejected_ideas.extend(output.rejected_ideas)
+        session.next_action = output.next_action
+        self._handle_round_output(session, output)
+        self.store.save(session)
+        self._brief_writer(session).write(session)
+
+        thesis_path = self.config.paper_dir(session.session_id) / "thesis.md"
+        if not thesis_path.exists():
+            return "⚠️ thesis.mdが作成されませんでした\n\n" + sub_output[-1200:]
+        content = thesis_path.read_text(encoding="utf-8")
+        headings = [line.strip() for line in content.splitlines() if line.lstrip().startswith("#")]
+        self._record(
+            session,
+            event_type="paper_written",
+            files_changed=[str(thesis_path)],
+            decision="paper/thesis.mdを作成または更新",
+            confidence="high",
+        )
+        return (
+            f"論文を更新しました。\n"
+            f"保存先: {thesis_path}\n"
+            f"文字数: {len(content)}\n"
+            "セクション見出し:\n" + "\n".join(f"- {heading}" for heading in headings)
+        )
+
     def run_task(self, text: str) -> str:
         from harness.agent_runner import SubAgentCommandRunner, parse_approval_required
 
@@ -1023,7 +1176,8 @@ class ResearchOrchestrator:
 
     def _run_until_blocked_or_done(self, session: ResearchSession) -> str:
         reports: list[str] = []
-        while session.mode == Mode.RESEARCH and session.round_id < self.config.max_rounds:
+        round_limit = session.round_budget or self.config.max_rounds
+        while session.mode == Mode.RESEARCH and session.round_id < round_limit:
             output = self.runner.run_round(session)
             session.round_id += 1
             session.current_question = f"R{session.round_id}: {session.research_goal}"
@@ -1034,7 +1188,7 @@ class ResearchOrchestrator:
             reports.append(report)
             if session.mode == Mode.APPROVAL_BLOCKED:
                 break
-        if session.mode == Mode.RESEARCH and session.round_id >= self.config.max_rounds:
+        if session.mode == Mode.RESEARCH and session.round_id >= round_limit:
             session.transition_to(Mode.DONE)
             session.completed_reason = "MAX_ROUNDS reached"
             session.next_action = "/re stop でjournal要約を表示する"

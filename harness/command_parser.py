@@ -30,9 +30,9 @@ def parse_research_command(text: str) -> Command:
         key = "query" if action == "search" else "text"
         return Command(name, {key: " ".join(rest)})
     if action == "paper":
-        if len(rest) != 1:
-            raise ValueError("/re paper requires <paper_id>")
-        return Command("paper", {"paper_id": rest[0]})
+        if len(rest) == 1 and rest[0].startswith("P-"):
+            return Command("paper", {"paper_id": rest[0]})
+        return Command("paper_write", {"instruction": " ".join(rest)})
     if action == "approve":
         if len(rest) != 1:
             raise ValueError("/re approve requires <id>")

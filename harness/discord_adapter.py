@@ -276,9 +276,13 @@ class DiscordBotAdapter:
         async def re_papers(interaction: discord.Interaction) -> None:
             await _handle_command(interaction, Command("papers"))
 
-        @re.command(name="paper", description="指定した文献IDの詳細を表示します。")
-        async def re_paper(interaction: discord.Interaction, paper_id: str) -> None:
-            await _handle_command(interaction, Command("paper", {"paper_id": paper_id}))
+        @re.command(name="paper", description="論文を執筆・改訂します。P-で始まるIDなら文献詳細を表示します。")
+        async def re_paper(interaction: discord.Interaction, instruction: str = "") -> None:
+            if instruction.startswith("P-"):
+                command = Command("paper", {"paper_id": instruction})
+            else:
+                command = Command("paper_write", {"instruction": instruction})
+            await _handle_command(interaction, command)
 
         @re.command(name="exps", description="実験一覧を表示")
         async def re_exps(interaction: discord.Interaction) -> None:
@@ -321,7 +325,11 @@ class DiscordBotAdapter:
             if self.important_channel_id and str(message.channel.id) != str(self.important_channel_id):
                 return
             session = orchestrator.store.load()
-            if not session or session.mode.value != "PLANNING" or session.phase != "plan":
+            if not session:
+                return
+            if session.mode.value == "PLANNING" and session.phase != "plan":
+                return
+            if session.mode.value not in {"PLANNING", "RESEARCH", "DONE"}:
                 return
             attachment_paths = await _save_plan_attachments(message, session)
             before_important = output_adapter.important_sent_count

@@ -14,7 +14,7 @@ ALLOWED_TRANSITIONS: dict[Mode, set[Mode]] = {
     Mode.RESEARCH: {Mode.APPROVAL_BLOCKED, Mode.PAUSED, Mode.DONE, Mode.PLANNING},
     Mode.APPROVAL_BLOCKED: {Mode.RESEARCH, Mode.PLANNING, Mode.DONE},
     Mode.PAUSED: {Mode.PLANNING, Mode.RESEARCH, Mode.APPROVAL_BLOCKED, Mode.DONE},
-    Mode.DONE: {Mode.PLANNING},
+    Mode.DONE: {Mode.PLANNING, Mode.RESEARCH},
 }
 
 

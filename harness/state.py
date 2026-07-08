@@ -64,6 +64,7 @@ class ResearchSession:
     version_label: str = ""
     research_dir: str = ""
     round_id: int = 0
+    round_budget: int = 0
     current_question: str = ""
     next_action: str = ""
     planning_questions: list[str] = field(default_factory=lambda: list(PLANNING_QUESTIONS))
@@ -141,6 +142,7 @@ class ResearchSession:
             version_label=data.get("version_label", ""),
             research_dir=data.get("research_dir", ""),
             round_id=data.get("round_id", 0),
+            round_budget=data.get("round_budget", 0),
             current_question=data.get("current_question", ""),
             next_action=data.get("next_action", ""),
             planning_questions=list(data.get("planning_questions", PLANNING_QUESTIONS)),

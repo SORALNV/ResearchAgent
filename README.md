@@ -196,7 +196,17 @@ Image attachments posted during `plan` mode are saved under `artifacts/attachmen
 
 If the internal novelty gate has produced a blocking result, `/re start` stays in `PLANNING` and posts an important-channel phase-gate decision request instead of entering `RESEARCH`. Use `/re accept PG-1` to proceed despite the risk, or `/re revise PG-1 <reason>` to keep planning and record the revision reason.
 
-`/re approve` records the approval and continues research rounds until `MAX_ROUNDS`. `/re stop` marks the session `DONE` and posts a journal summary.
+During `RESEARCH` and `DONE`, ordinary Discord messages in the important channel continue the same assistant conversation thread with current research context attached. The assistant should answer Sora's questions and point to `/re task <内容>` for experiments, `/re paper` for thesis updates, and `/re start` for additional rounds.
+
+`/re approve` records the approval and continues research rounds until `MAX_ROUNDS`. `/re stop` marks the session `DONE` and posts a journal summary. After a session reaches `DONE`, `/re start` resumes additional research rounds instead of treating the session as closed; the new round budget is added on top of the current round number.
+
+## Paper Writing
+
+Use `/re paper` to ask the sub-agent to write or update the thesis at `paper/thesis.md`. `/re paper <instruction>` passes an explicit revision instruction, while `/re paper P-xxx` keeps the existing behavior and shows details for the paper record with that ID.
+
+The thesis structure is: title, abstract, introduction, related work, proposed method or approach, experiments, discussion, conclusion and future work, and references. Related work should cite entries from `papers.jsonl` as `[P-xxx]` with URLs. Experiment sections should use `experiments.jsonl` and measured outputs under `experiments/*/results/`; unsupported numbers must be marked as unverified.
+
+Figures live under `paper/figures/` and should be embedded from `thesis.md` with paths relative to `paper/`, for example `![caption](figures/example.png)`.
 
 ## Planning Dialogue And Scout
 

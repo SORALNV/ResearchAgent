@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 
 from harness.agent_runner import RoundOutput
@@ -25,14 +25,31 @@ class LedgerEntry:
     next_action: str
     evidence_ids: list[str]
     selected_as_best: bool
+    criteria_status: list[dict] = field(default_factory=list)
+    critique: str = ""
+    director_decision: str = ""
 
 
 class ResearchLedger:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def append_round(self, session: ResearchSession, output: RoundOutput) -> LedgerEntry:
+    def append_round(
+        self,
+        session: ResearchSession,
+        output: RoundOutput,
+        verdict=None,
+        evidence_ids: list[str] | None = None,
+    ) -> LedgerEntry:
         round_id = session.round_id
+        critique = getattr(verdict, "critique", "") if verdict else ""
+        feedback = output.review_output
+        if critique:
+            feedback = f"{feedback}\n\nDirector critique:\n{critique}".strip()
+        criteria_status = []
+        if verdict:
+            for item in getattr(verdict, "criteria_status", []) or []:
+                criteria_status.append(asdict(item) if is_dataclass(item) else dict(item))
         entry = LedgerEntry(
             timestamp=utc_timestamp(),
             ledger_id=f"L-{round_id:03d}",
@@ -43,11 +60,18 @@ class ResearchLedger:
             hypothesis=session.current_question or session.research_goal,
             action=output.subtask,
             result=output.sub_agent_output,
-            feedback=output.review_output,
+            feedback=feedback,
             failure_class=_failure_class(output),
             next_action=output.next_action,
-            evidence_ids=list(session.planning_scout.get("evidence_paper_ids") or []),
+            evidence_ids=(
+                list(evidence_ids)
+                if evidence_ids is not None
+                else list(session.planning_scout.get("evidence_paper_ids") or [])
+            ),
             selected_as_best=True,
+            criteria_status=criteria_status,
+            critique=critique,
+            director_decision=getattr(verdict, "decision", "") if verdict else "",
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
@@ -58,11 +82,16 @@ class ResearchLedger:
     def read_entries(self) -> list[LedgerEntry]:
         if not self.path.exists():
             return []
-        return [
-            LedgerEntry(**json.loads(line))
-            for line in self.path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        entries: list[LedgerEntry] = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            data.setdefault("criteria_status", [])
+            data.setdefault("critique", "")
+            data.setdefault("director_decision", "")
+            entries.append(LedgerEntry(**data))
+        return entries
 
 
 def _failure_class(output: RoundOutput) -> str | None:

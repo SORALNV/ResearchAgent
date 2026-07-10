@@ -43,6 +43,7 @@ class HarnessConfig:
     fresh_agent_command: str | None = None
     claude_agent_command: str | None = None
     plan_agent_model: str = "5.4mini"
+    director_model: str = ""
     research_agent_model: str = "gpt-5.5"
     max_rounds: int = 3
     fresh_interval: int = 2
@@ -94,6 +95,7 @@ class HarnessConfig:
             fresh_agent_command=os.getenv("FRESH_AGENT_COMMAND") or None,
             claude_agent_command=os.getenv("CLAUDE_AGENT_COMMAND") or None,
             plan_agent_model=os.getenv("PLAN_AGENT_MODEL", "5.4mini"),
+            director_model=os.getenv("DIRECTOR_MODEL", ""),
             research_agent_model=os.getenv("RESEARCH_AGENT_MODEL", "gpt-5.5"),
             max_rounds=_int_env("MAX_ROUNDS", 3),
             fresh_interval=_int_env("FRESH_INTERVAL", 2),

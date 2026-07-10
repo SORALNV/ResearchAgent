@@ -201,6 +201,14 @@ During `RESEARCH` and `DONE`, ordinary Discord messages in the important channel
 
 `/re approve` records the approval and continues research rounds until `MAX_ROUNDS`. `/re stop` marks the session `DONE` and posts a journal summary. After a session reaches `DONE`, `/re start` resumes additional research rounds instead of treating the session as closed; the new round budget is added on top of the current round number.
 
+## 研究ラウンドの適応ループ
+
+When `SUB_AGENT_COMMAND` is configured, each research round runs the sub-agent and then calls a read-only director pass. The director checks the latest sub output, artifacts, and `experiments.jsonl` against the stored goal criteria, critiques weak or unsupported claims, and decides one of four outcomes: `CONTINUE`, `FINAL_REPORT`, `DONE`, or `BLOCKED`.
+
+`CONTINUE` stores the director's concrete next task in session state, so the next round uses that task instead of the default fixed template. `FINAL_REPORT` forces the next sub-agent task to write `artifacts/report.md`. `DONE` finishes early only when all criteria are met and `artifacts/report.md` already exists; otherwise it falls back to final-report generation. `BLOCKED` pauses the session and asks Sora to resume or redirect after the blocking issue is resolved.
+
+The director model defaults to `PLAN_AGENT_MODEL`. Set `DIRECTOR_MODEL` to use a different model for this verification step. Regardless of director output, the penultimate round always forces the final round to be the integrated report task, so the run does not spend its last budget on another experiment without a report.
+
 ## Paper Writing
 
 Use `/re paper` to ask the sub-agent to write or update the thesis at `paper/thesis.md`. `/re paper <instruction>` passes an explicit revision instruction, while `/re paper P-xxx` keeps the existing behavior and shows details for the paper record with that ID.

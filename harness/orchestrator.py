@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 
-from harness.agent_runner import MockAgentRunner, RoundOutput
+from harness.agent_runner import FINAL_REPORT_TASK, MockAgentRunner, RoundOutput
 from harness.approval import ApprovalGate, render_approval_request
 from harness.commands import Command, CommandContext, CommandResult
 from harness.config import HarnessConfig
@@ -11,6 +12,7 @@ from harness.cost import CostManager
 from harness.doctor import render_doctor, run_doctor
 from harness.discord_adapter import DiscordAdapter, FakeDiscordAdapter
 from harness.eval import run_golden_eval
+from harness.experiments import ExperimentStore
 from harness.journal import Journal
 from harness.ledger import ResearchLedger
 from harness.modes import Mode
@@ -20,6 +22,7 @@ from harness.planning_dialogue import PlanningDialogueRunner, parse_plan_update
 from harness.planning import build_planning_scout, generate_planning_query, render_planning_scout
 from harness.reporting import render_report, render_run_summary, review_report
 from harness.research_brief import ResearchBriefWriter, render_research_brief
+from harness.round_director import RoundDirector
 from harness.state import PhaseGate, ResearchSession, SessionStore, utc_timestamp
 
 
@@ -38,6 +41,7 @@ class ResearchOrchestrator:
         self.paper_provider = self._build_paper_provider(config.paper_provider)
         self.runner = runner or MockAgentRunner(config)
         self.planning_dialogue = PlanningDialogueRunner(config)
+        self.round_director = RoundDirector(self.config) if self.config.sub_agent_command else None
 
     def handle(
         self,
@@ -1259,7 +1263,22 @@ class ResearchOrchestrator:
             session.accepted_ideas.extend(output.accepted_ideas)
             session.rejected_ideas.extend(output.rejected_ideas)
             session.next_action = output.next_action
-            report = self._handle_round_output(session, output)
+            verdict = None
+            needs_approval = bool(
+                output.proposed_operation
+                and self.approval_gate.requires_approval(output.proposed_operation)
+            )
+            if self.round_director is not None and not needs_approval:
+                verdict = self.round_director.assess(
+                    session,
+                    session.round_id,
+                    round_limit,
+                    output.subtask,
+                    output.sub_agent_output,
+                    self._experiment_summary(session),
+                )
+                self._apply_director_verdict(session, verdict, round_limit)
+            report = self._handle_round_output(session, output, verdict)
             reports.append(report)
             if session.mode == Mode.APPROVAL_BLOCKED:
                 break
@@ -1292,7 +1311,82 @@ class ResearchOrchestrator:
         self._brief_writer(session).write(session)
         return "\n\n".join(reports)
 
-    def _handle_round_output(self, session: ResearchSession, output: RoundOutput) -> str:
+    def _apply_director_verdict(
+        self,
+        session: ResearchSession,
+        verdict,
+        round_limit: int,
+    ) -> None:
+        criteria_status = [asdict(item) for item in verdict.criteria_status]
+        self._record(
+            session,
+            event_type="director_verdict",
+            decision=verdict.decision,
+            confidence=verdict.source,
+            criteria_status=criteria_status,
+            critique=verdict.critique,
+            next_task=verdict.next_task,
+            source=verdict.source,
+            raw=verdict.raw[:2000],
+        )
+
+        if verdict.decision == "CONTINUE":
+            if verdict.next_task.strip():
+                next_round = session.round_id + 1
+                session.next_round_task = (
+                    verdict.next_task.strip()
+                    + "\n\n【前ラウンドへの批評（考慮すること）】\n"
+                    + verdict.critique.strip()
+                    + f"\n作業メモは artifacts/round{next_round}_notes.md に記録する。"
+                )
+            else:
+                session.next_round_task = ""
+        elif verdict.decision == "FINAL_REPORT":
+            session.next_round_task = FINAL_REPORT_TASK
+        elif verdict.decision == "DONE":
+            if self.config.report_path(session.session_id).exists():
+                remaining = max(round_limit - session.round_id, 0)
+                session.next_round_task = ""
+                session.transition_to(Mode.DONE)
+                session.completed_reason = "GOAL_CRITERIA_MET"
+                session.next_action = "/re stop でレポートを確定する"
+                message = (
+                    f"ゴール条件充足により早期完了（残り予算{remaining}ラウンド）\n"
+                    + "\n".join(
+                        f"- {item.criterion}: {item.status} | {item.evidence}"
+                        for item in verdict.criteria_status
+                    )
+                ).strip()
+                self.discord.send(message, channel="important")
+                self._record(
+                    session,
+                    event_type="discord_report_sent",
+                    discord_report=message,
+                    decision="GOAL_CRITERIA_MET",
+                    confidence=verdict.source,
+                )
+            else:
+                session.next_round_task = FINAL_REPORT_TASK
+        elif verdict.decision == "BLOCKED":
+            session.next_round_task = ""
+            session.transition_to(Mode.PAUSED)
+            session.next_action = (
+                f"{verdict.reason}\n/re resume か /re redirect <指示> で再開"
+            ).strip()
+            message = f"研究ラウンドがBLOCKEDになりました。\n理由: {verdict.reason}"
+            self.discord.send(message, channel="important")
+            self._record(
+                session,
+                event_type="discord_report_sent",
+                discord_report=message,
+                decision="BLOCKED",
+                confidence=verdict.source,
+            )
+
+        if session.round_id == round_limit - 1 and session.mode == Mode.RESEARCH:
+            session.next_round_task = FINAL_REPORT_TASK
+
+    def _handle_round_output(self, session: ResearchSession, output: RoundOutput, verdict=None) -> str:
         approval_text = "なし"
         notice_text = ""
         if output.proposed_operation and self.approval_gate.requires_approval(output.proposed_operation):
@@ -1307,15 +1401,22 @@ class ResearchOrchestrator:
                 f"影響: {output.proposed_operation.impact}\n"
                 f"ドライラン結果: {output.proposed_operation.dry_run_result}"
             )
+        verification = output.review_output + (
+            f"\nClaude: {output.claude_consultation}" if output.claude_consultation else ""
+        )
+        decision = output.decision
+        if verdict:
+            if verdict.critique:
+                verification = f"{verification}\nDirector critique:\n{verdict.critique}"
+            decision = f"{decision} / director: {verdict.decision}"
         report = self._format_report(
             session,
             purpose=session.current_question,
             did=output.main_agent_summary,
             result=output.sub_agent_output,
             fresh=output.fresh_agent_output or "なし",
-            verification=output.review_output
-            + (f"\nClaude: {output.claude_consultation}" if output.claude_consultation else ""),
-            decision=output.decision,
+            verification=verification,
+            decision=decision,
             confidence=output.confidence,
             approval=approval_text,
         )
@@ -1335,11 +1436,16 @@ class ResearchOrchestrator:
             review_output=output.review_output,
             claude_consultation=output.claude_consultation,
             fresh_agent_output=output.fresh_agent_output,
-            decision=output.decision,
+            decision=decision,
             confidence=output.confidence,
             files_changed=[str(self.config.journal_path(session.session_id))],
         )
-        ledger_entry = self._research_ledger(session).append_round(session, output)
+        ledger_entry = self._research_ledger(session).append_round(
+            session,
+            output,
+            verdict=verdict,
+            evidence_ids=self._round_evidence_ids(session),
+        )
         self._record(
             session,
             event_type="ledger_entry_appended",
@@ -1377,6 +1483,30 @@ class ResearchOrchestrator:
         )
         return report
 
+    def _round_evidence_ids(self, session: ResearchSession) -> list[str]:
+        evidence_ids = list(session.planning_scout.get("evidence_paper_ids") or [])
+        seen = set(evidence_ids)
+        for entry in ExperimentStore(self.config.experiments_path(session.session_id)).read_all():
+            if entry.round_id != session.round_id or entry.exp_id in seen:
+                continue
+            evidence_ids.append(entry.exp_id)
+            seen.add(entry.exp_id)
+        return evidence_ids
+
+    def _experiment_summary(self, session: ResearchSession) -> str:
+        entries = ExperimentStore(self.config.experiments_path(session.session_id)).read_all()
+        if not entries:
+            return "なし"
+        lines = []
+        for entry in entries[-10:]:
+            hypothesis = entry.hypothesis[:80]
+            metrics = entry.metrics if entry.metrics else {}
+            lines.append(
+                f"{entry.exp_id} [round={entry.round_id} {entry.status}] "
+                f"{entry.name}: {hypothesis} metrics={metrics}"
+            )
+        return "\n".join(lines)
+
     def _format_report(
         self,
         session: ResearchSession,
@@ -1390,6 +1520,10 @@ class ResearchOrchestrator:
         approval: str = "なし",
     ) -> str:
         lines = [f"{self._display_mode(session)}モードになりました。", str(result).strip()]
+        if verification and "Director critique:" in verification:
+            lines.append(f"検証: {verification}")
+        if decision and "director:" in decision:
+            lines.append(f"判断: {decision}")
         if fresh != "なし":
             lines.append(f"新規アイデア: {fresh}")
         if approval != "なし":

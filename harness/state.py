@@ -88,6 +88,7 @@ class ResearchSession:
     paused_from: Mode | None = None
     completed_reason: str | None = None
     memory_saved: bool = False
+    next_round_task: str = ""
 
     @classmethod
     def new(cls, goal: str, project_name: str = "Research Harness MVP") -> "ResearchSession":
@@ -167,6 +168,7 @@ class ResearchSession:
             paused_from=Mode(data["paused_from"]) if data.get("paused_from") else None,
             completed_reason=data.get("completed_reason"),
             memory_saved=bool(data.get("memory_saved", False)),
+            next_round_task=data.get("next_round_task", ""),
         )
 
 

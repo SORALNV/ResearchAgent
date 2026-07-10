@@ -19,6 +19,23 @@ DEFAULT_PROMPTS = {
     "fresh": "既出案と重複しない新規アイデアを返す。",
 }
 
+FINAL_REPORT_TASK = (
+    "これまでの全成果物を統合し、図・グラフを含む最終レポートを "
+    "artifacts/report.md に執筆する"
+)
+
+ARTIFACT_EXCLUDED_PARTS = {
+    ".venv",
+    "venv",
+    "venv_probe",
+    "__pycache__",
+    "node_modules",
+    ".git",
+    "site-packages",
+    ".ipynb_checkpoints",
+}
+ARTIFACT_EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
+
 
 @dataclass
 class RoundOutput:
@@ -75,7 +92,8 @@ class MockAgentRunner:
                 impact="MVPでは実ファイル削除は行わない。承認状態だけを検証する。",
                 dry_run_result="危険操作として検出。@Sora の /re approve が来るまで停止する。",
             )
-        subtask = self._build_round_task(session, round_number, self.config.max_rounds)
+        round_limit = session.round_budget or self.config.max_rounds
+        subtask = self._build_round_task(session, round_number, round_limit)
         sub_agent_output = "Mock sub-agent output: 変更diffなし。E2E観点は満たせる見込み。"
         if real_mode:
             sub_agent_output = SubAgentCommandRunner(self.config).run(
@@ -99,7 +117,7 @@ class MockAgentRunner:
                 confidence="mid" if proposed_operation else "high",
                 next_action=(
                     "/re stop でレポートを確定する"
-                    if round_number >= self.config.max_rounds
+                    if round_number >= round_limit
                     else "次ラウンドで続きを進める"
                 ),
             )
@@ -122,11 +140,10 @@ class MockAgentRunner:
     def _build_round_task(self, session: ResearchSession, round_number: int, max_rounds: int) -> str:
         if not self.config.sub_agent_command:
             return f"Mock sub-agent: {self.prompts['sub']}"
+        if session.next_round_task.strip():
+            return session.next_round_task.strip()
         if round_number >= max_rounds:
-            return (
-                "これまでの全成果物を統合し、図・グラフを含む最終レポートを "
-                "artifacts/report.md に執筆する"
-            )
+            return FINAL_REPORT_TASK
         if round_number == 1:
             return (
                 "plan.mdのゴール条件と研究方法に沿って、調査・実験準備"
@@ -243,6 +260,7 @@ class SubAgentCommandRunner:
   APPROVAL_REQUIRED: operation=<操作>; reason=<理由>; impact=<影響>; dry_run_result=<実行していない確認結果>
 - 大量ファイル生成や長時間コマンドが必要なら、その必要性を報告だけして実行しない
 - 返答には、結果、使ったコマンド、変更ファイル、失敗、未確認事項、次の提案を含める
+- taskには前ラウンドへの批評が含まれることがある。指摘された未確認事項の解消を優先する
 - 図・グラフが有効な場合は python3（システムPython。matplotlib 3.6 が利用可能）で生成し、artifacts/figures/*.png に保存する
 - レポートから図を参照する場合は、artifacts/report.md からの相対パス（figures/xxx.png）を使う
 - matplotlib が使えない場合や図が不適な場合は、markdown表・mermaid記法で代替する
@@ -278,7 +296,11 @@ artifacts内の既存ファイル:
         artifacts_dir = Path(session.research_dir) / "artifacts"
         if not artifacts_dir.exists():
             return "なし"
-        paths = sorted(path for path in artifacts_dir.rglob("*") if path.is_file())
+        paths = sorted(
+            path
+            for path in artifacts_dir.rglob("*")
+            if path.is_file() and not _artifact_excluded(path.relative_to(artifacts_dir))
+        )
         if not paths:
             return "なし"
         lines = [f"- artifacts/{path.relative_to(artifacts_dir)}" for path in paths[:30]]
@@ -331,3 +353,9 @@ def parse_approval_required(text: str) -> ProposedOperation | None:
             dry_run_result=parts.get("dry_run_result", "未実行。Discord承認待ちに変換した。"),
         )
     return None
+
+
+def _artifact_excluded(relative_path: Path) -> bool:
+    if relative_path.suffix in ARTIFACT_EXCLUDED_SUFFIXES:
+        return True
+    return any(part in ARTIFACT_EXCLUDED_PARTS for part in relative_path.parts)

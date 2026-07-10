@@ -74,6 +74,7 @@ class ExperimentRoadmapPlanner:
         methods = "\n".join(f"- {item}" for item in session.research_methods) or "- 未確定"
         constraints = "\n".join(f"- {item}" for item in session.constraints) or "- なし"
         questions = "\n".join(f"- {item}" for item in session.open_questions) or "- なし"
+        lessons = "\n".join(f"- {item}" for item in session.lessons[-5:]) or "- なし"
         return f"""あなたは研究の実験計画者。ゴール条件を検証可能にする最小の実験系列を設計する。
 
 研究ゴール:
@@ -90,6 +91,9 @@ class ExperimentRoadmapPlanner:
 
 未解決の確認事項:
 {questions}
+
+これまでの教訓（過去の失敗から。同じ轍を踏まない）:
+{lessons}
 
 plan.md（先頭6000字）:
 {plan_text[:6000]}

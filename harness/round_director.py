@@ -32,6 +32,13 @@ class ExperimentUpdate:
 
 
 @dataclass
+class FailureAnalysis:
+    root_cause: str = ""
+    lesson: str = ""
+    alternative: str = ""
+
+
+@dataclass
 class DirectorVerdict:
     decision: str
     criteria_status: list[CriterionStatus]
@@ -41,6 +48,7 @@ class DirectorVerdict:
     raw: str
     source: str
     experiment_updates: list[ExperimentUpdate] = field(default_factory=list)
+    failure_analysis: FailureAnalysis | None = None
 
 
 class RoundDirector:
@@ -56,6 +64,7 @@ class RoundDirector:
         sub_output: str,
         experiment_summary: str,
         backlog_summary: str = "",
+        stall_note: str = "",
     ) -> DirectorVerdict:
         command = self._build_command(session)
         prompt = self._build_prompt(
@@ -66,6 +75,7 @@ class RoundDirector:
             sub_output=sub_output,
             experiment_summary=experiment_summary,
             backlog_summary=backlog_summary,
+            stall_note=stall_note,
         )
         try:
             completed = subprocess.run(
@@ -128,11 +138,19 @@ class RoundDirector:
         sub_output: str,
         experiment_summary: str,
         backlog_summary: str,
+        stall_note: str = "",
     ) -> str:
         criteria = _numbered_items(session.goal_criteria, empty="未確定")
         methods = _bullet_items(session.research_methods, empty="未確定")
         constraints = _bullet_items(session.constraints, empty="なし")
         questions = _bullet_items(session.open_questions, empty="なし")
+        lessons = _bullet_items(session.lessons[-5:], empty="なし")
+        stall_block = ""
+        if stall_note.strip():
+            stall_block = f"""
+【停滞】{stall_note.strip()}
+同一路線の継続ではなく方針転換を検討せよ。EXPERIMENTS_UPDATEでバックログを組み替え（別ルートの実験をadd、見込みのないplanned実験をretire）、NEXT_TASKに反映する。
+"""
         remaining = max(round_limit - round_number, 0)
         return f"""あなたは研究ディレクター。subエージェントのラウンド結果を検証し、次の一手を決める。
 
@@ -153,9 +171,13 @@ class RoundDirector:
 未解決の確認事項:
 {questions}
 
+これまでの教訓（過去の失敗から。同じ轍を踏まない）:
+{lessons}
+
 今回のラウンド:
 R{round_number} / round_limit={round_limit}
 残りラウンド数: {remaining}
+{stall_block}
 
 今回subに与えたタスク:
 {subtask}
@@ -173,6 +195,7 @@ subの出力（先頭8000字）:
 - 証拠（実測値・ファイル・出典）に基づいて criteria を判定する。subの自己申告を鵜呑みにしない
 - criterionをmetにできるのは、evidenceに具体的な裏付け（EXP-xxxの実測値、ファイルパス、P-xxx出典）を書ける場合だけ。検証の記述が無い結果はpartial止まり
 - 未検証の主張・矛盾・過度な一般化を critique で指摘する
+- 失敗・エラーがあった場合は冷静に根本原因を分析する。症状（エラーメッセージ）と原因（設計・環境・前提の誤り）を区別する
 - 結果に応じてバックログを手入れする: 新たに必要な実験はadd、無意味になったplanned実験はretire
 - next_task は「subが1ラウンドで実行可能な具体的作業」1〜3文。前ラウンドの失敗や未確認事項の解消を優先する
 - 全criteriaがmetで最終レポート（artifacts/report.md）が最新なら DONE
@@ -187,6 +210,10 @@ CRITIQUE: <2〜4行。改行可>
 DECISION: CONTINUE|FINAL_REPORT|DONE|BLOCKED
 NEXT_TASK: <1〜3文。DONE/BLOCKEDなら「なし」>
 REASON: <1〜2行>
+FAILURE_ANALYSIS:（このラウンドで実験失敗・実行エラー・環境問題があった場合のみ。無ければセクションごと省略）
+- root_cause: <根本原因を1行>
+- lesson: <次以降や将来の研究に一般化できる教訓を1行>
+- alternative: <同じゴールへ向かう別ルートを1行>
 EXPERIMENTS_UPDATE:
 - add: <name> | <仮説> | <成功指標> | <high|mid|low>
 - retire: <EXP-xxx> | <理由>
@@ -207,7 +234,33 @@ def parse_director_output(text: str) -> DirectorVerdict:
         raw=text,
         source="llm",
         experiment_updates=_parse_experiment_updates(text),
+        failure_analysis=_parse_failure_analysis(text),
     )
+
+
+def _parse_failure_analysis(text: str) -> FailureAnalysis | None:
+    values = {"root_cause": "", "lesson": "", "alternative": ""}
+    capture = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _heading_name(stripped) == "FAILURE_ANALYSIS":
+            capture = True
+            continue
+        if capture and _heading_name(stripped):
+            break
+        if not capture:
+            continue
+        match = re.match(
+            r"^[-*]\s*(root_cause|lesson|alternative)\s*[:：]\s*(.*)$",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        values[match.group(1).lower()] = match.group(2).strip()
+    if not any(values.values()):
+        return None
+    return FailureAnalysis(**values)
 
 
 def _parse_experiment_updates(text: str) -> list[ExperimentUpdate]:

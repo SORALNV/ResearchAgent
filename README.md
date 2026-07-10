@@ -38,6 +38,14 @@ The harness records and routes work. It should avoid pretending to be the resear
 
 subエージェントのハード失敗（timeout、非ゼロ終了、空stdout）は `MAX_ROUND_RETRIES` 回まで即時リトライします。再試行時は前回失敗の末尾を渡し、別ルートの回避策を試すよう促します。
 
+## 失敗省察・停滞検知・査読ゲート
+
+Directorは失敗や環境エラーを見つけた場合、根本原因・教訓・代替ルートを `FAILURE_ANALYSIS` として返せます。教訓はセッションに最大20件まで蓄積され、subエージェント、Director、実験ロードマップ生成、終了時のagent memoryに注入されます。
+
+`STALL_ROUNDS` ラウンド連続でgoal criteriaの `met` 数も `done` 実験数も増えない場合、停滞をjournalとDiscordへ記録し、次ラウンドタスクに方針転換指示を追記します。失敗した直近アプローチを繰り返さず、別手法・別データ・課題分割・スコープ縮小を検討させるための安全弁です。
+
+`artifacts/report.md` がある状態でDirectorが `DONE` を出した場合、完了前に `ReportReviewer` が査読します。`ACCEPT` なら従来どおり完了し、`REVISE` なら `MAX_REPORT_REVISIONS` 回までRESEARCHへ戻して指摘解消タスクを実行します。`REVIEWER_MODEL` が空なら `DIRECTOR_MODEL`、さらに空なら `PLAN_AGENT_MODEL` を使います。
+
 ## Setup
 
 ```bash

@@ -91,6 +91,12 @@ class ResearchSession:
     memory_saved: bool = False
     next_round_task: str = ""
     last_criteria_status: list[dict[str, Any]] = field(default_factory=list)
+    lessons: list[str] = field(default_factory=list)
+    stall_rounds: int = 0
+    progress_met_count: int = 0
+    progress_done_experiments: int = 0
+    last_report_review: dict = field(default_factory=dict)
+    report_review_rounds: int = 0
 
     @classmethod
     def new(cls, goal: str, project_name: str = "Research Harness MVP") -> "ResearchSession":
@@ -173,6 +179,12 @@ class ResearchSession:
             memory_saved=bool(data.get("memory_saved", False)),
             next_round_task=data.get("next_round_task", ""),
             last_criteria_status=list(data.get("last_criteria_status", [])),
+            lessons=list(data.get("lessons", [])),
+            stall_rounds=int(data.get("stall_rounds", 0)),
+            progress_met_count=int(data.get("progress_met_count", 0)),
+            progress_done_experiments=int(data.get("progress_done_experiments", 0)),
+            last_report_review=dict(data.get("last_report_review", {})),
+            report_review_rounds=int(data.get("report_review_rounds", 0)),
         )
 
 

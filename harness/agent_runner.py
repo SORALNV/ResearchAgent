@@ -271,6 +271,7 @@ class SubAgentCommandRunner:
         from harness.memory import AgentMemory
         memory_digest = AgentMemory(self.config.agent_memory_path).digest(max_chars=1200)
         constraints = "\n".join(f"- {item}" for item in session.constraints) or "- なし"
+        lessons = "\n".join(f"- {item}" for item in session.lessons[-5:]) or "- なし"
         return f"""あなたは研究ハーネスのsubエージェントです。
 単一タスクだけを実行し、結果を構造化して返してください。
 作業規約は研究フォルダ直下の AGENTS.md に記載されている（自動で読み込まれる）。矛盾時はAGENTS.mdより本プロンプトを優先。
@@ -312,6 +313,9 @@ artifacts内の既存ファイル:
 
 実験台帳サマリ:
 {experiment_summary}
+
+これまでの教訓（過去の失敗から。同じ轍を踏まない）:
+{lessons}
 
 長期記憶（過去の研究・ユーザーの好み）:
 {memory_digest}

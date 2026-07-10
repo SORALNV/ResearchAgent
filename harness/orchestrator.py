@@ -27,6 +27,7 @@ from harness.planning import (
     render_redirects_and_constraints_for_plan,
 )
 from harness.reporting import render_report, render_run_summary, review_report
+from harness.report_review import ReportReviewer, ReviewResult
 from harness.research_brief import ResearchBriefWriter, render_research_brief
 from harness.roadmap import ExperimentRoadmapPlanner
 from harness.round_director import RoundDirector
@@ -50,6 +51,7 @@ class ResearchOrchestrator:
         self.planning_dialogue = PlanningDialogueRunner(config)
         self.round_director = RoundDirector(self.config) if self.config.sub_agent_command else None
         self.roadmap_planner = ExperimentRoadmapPlanner(config) if self.config.sub_agent_command else None
+        self.report_reviewer = ReportReviewer(config)
 
     def handle(
         self,
@@ -405,11 +407,20 @@ class ResearchOrchestrator:
             total = len(session.last_criteria_status)
             met = sum(1 for item in session.last_criteria_status if item.get("status") == "met")
             criteria_line = f"条件充足: met {met}/{total}\n"
+        review_line = "査読: 未実施"
+        if session.last_report_review:
+            verdict = session.last_report_review.get("verdict", "未実施")
+            score = session.last_report_review.get("score", 0)
+            if verdict == "REVISE":
+                review_line = f"査読: REVISE(改訂{session.report_review_rounds}回)"
+            else:
+                review_line = f"査読: {verdict}(スコア{score})"
         return (
             f"モード: {session.mode.value}\n"
             f"現在の問い: {session.current_question or '未設定'}\n"
             f"進捗: round {session.round_id}/{session.round_budget or self.config.max_rounds}\n"
             f"{criteria_line}"
+            f"教訓: {len(session.lessons)}件 / {review_line}\n"
             f"次の一手: {session.next_action or '未設定'}\n"
             f"承認待ち: {', '.join(pending) if pending else 'なし'}"
         )
@@ -747,6 +758,8 @@ class ResearchOrchestrator:
                 f"rounds: {session.round_id}",
                 "recent_experiments:",
                 *(experiments or ["- なし"]),
+                "教訓:",
+                *([f"- {item}" for item in session.lessons] or ["- なし"]),
                 f"next_action: {session.next_action}",
                 f"research_dir: {session.research_dir}",
             ]
@@ -1301,6 +1314,12 @@ class ResearchOrchestrator:
                 and self.approval_gate.requires_approval(output.proposed_operation)
             )
             if self.round_director is not None and not needs_approval:
+                threshold = max(self.config.stall_round_threshold, 1)
+                stall_note = (
+                    f"直近{session.stall_rounds}ラウンド進捗なし"
+                    if session.stall_rounds >= threshold
+                    else ""
+                )
                 verdict = self.round_director.assess(
                     session,
                     session.round_id,
@@ -1309,16 +1328,58 @@ class ResearchOrchestrator:
                     output.sub_agent_output,
                     self._experiment_summary(session),
                     self._planned_backlog_summary(session, limit=8),
+                    stall_note=stall_note,
                 )
                 self._apply_director_verdict(session, verdict, round_limit)
+                if session.mode == Mode.RESEARCH:
+                    self._update_stall_state(session)
             report = self._handle_round_output(session, output, verdict)
             reports.append(report)
             if session.mode == Mode.APPROVAL_BLOCKED:
                 break
         if session.mode == Mode.RESEARCH and session.round_id >= round_limit:
+            review_note = ""
+            review_revise = False
+            report_path = self.config.report_path(session.session_id)
+            if (
+                self.round_director is not None
+                and report_path.exists()
+                and session.report_review_rounds < self.config.max_report_revisions
+            ):
+                review = self._run_report_review(session)
+                review_note = f"\n査読: {review.verdict}（スコア{review.score}/5）"
+                if review.verdict == "REVISE":
+                    review_revise = True
+                    session.report_review_rounds += 1
+                    session.next_round_task = self._format_review_revision_task(review)
+                    issues = review.major_issues[:2]
+                    if issues:
+                        review_note += "\n重大指摘:\n" + "\n".join(f"- {item}" for item in issues)
+                    review_note += "\n/re start で改訂ラウンドを実行できます"
+                    self._record(
+                        session,
+                        event_type="report_review_revise",
+                        decision=review.verdict,
+                        critique="\n".join(review.major_issues),
+                        next_task=session.next_round_task,
+                        score=review.score,
+                        source=review.source,
+                    )
+                else:
+                    self._record(
+                        session,
+                        event_type="report_review_accept",
+                        decision=review.verdict,
+                        score=review.score,
+                        source=review.source,
+                    )
             session.transition_to(Mode.DONE)
             session.completed_reason = "MAX_ROUNDS reached"
-            session.next_action = "/re stop でjournal要約を表示する"
+            session.next_action = (
+                "/re start で査読指摘を改訂する"
+                if review_revise
+                else "/re stop でjournal要約を表示する"
+            )
             done_report = self._format_report(
                 session,
                 purpose="停止条件の確認",
@@ -1328,10 +1389,12 @@ class ResearchOrchestrator:
                     if self.config.sub_agent_command
                     else "MockAgentRunnerの研究ラウンドを完了した。"
                 )
-                + self._max_rounds_unmet_criteria_note(session),
+                + self._max_rounds_unmet_criteria_note(session)
+                + review_note,
                 verification=(
                     "journal.jsonlに各ラウンドを記録済み。"
                     + self._max_rounds_unmet_criteria_note(session)
+                    + review_note
                 ),
                 decision="DONE",
                 confidence="high",
@@ -1354,6 +1417,20 @@ class ResearchOrchestrator:
         verdict,
         round_limit: int,
     ) -> None:
+        analysis = getattr(verdict, "failure_analysis", None)
+        if analysis and analysis.lesson.strip():
+            lesson = analysis.lesson.strip()
+            if lesson not in session.lessons:
+                session.lessons.append(lesson)
+                if len(session.lessons) > 20:
+                    del session.lessons[: len(session.lessons) - 20]
+            self._record(
+                session,
+                event_type="failure_reflected",
+                decision=analysis.root_cause,
+                critique=lesson,
+                next_task=analysis.alternative,
+            )
         for item in verdict.criteria_status:
             if item.status == "met" and not item.evidence.strip():
                 item.status = "partial"
@@ -1420,17 +1497,54 @@ class ResearchOrchestrator:
             session.next_round_task = FINAL_REPORT_TASK
         elif verdict.decision == "DONE":
             if self.config.report_path(session.session_id).exists():
+                review = None
+                if session.report_review_rounds < self.config.max_report_revisions:
+                    review = self._run_report_review(session)
+                    if review.verdict == "REVISE":
+                        session.report_review_rounds += 1
+                        session.next_round_task = self._format_review_revision_task(review)
+                        session.next_action = "査読指摘を解消して report.md を改訂する"
+                        major_preview = review.major_issues[:2]
+                        message = (
+                            f"査読で差し戻し（スコア{review.score}/5）: "
+                            + (" / ".join(major_preview) if major_preview else "重大指摘なし")
+                        )
+                        self.discord.send(message, channel="important")
+                        self._record(
+                            session,
+                            event_type="report_review_revise",
+                            decision=review.verdict,
+                            critique="\n".join(review.major_issues),
+                            next_task=session.next_round_task,
+                            score=review.score,
+                            source=review.source,
+                        )
+                        return
                 remaining = max(round_limit - session.round_id, 0)
                 session.next_round_task = ""
                 session.transition_to(Mode.DONE)
                 session.completed_reason = "GOAL_CRITERIA_MET"
                 session.next_action = "/re stop でレポートを確定する"
+                review_line = (
+                    f"\n査読: ACCEPT（スコア{review.score}/5）"
+                    if review is not None
+                    else ""
+                )
+                if review is not None:
+                    self._record(
+                        session,
+                        event_type="report_review_accept",
+                        decision=review.verdict,
+                        score=review.score,
+                        source=review.source,
+                    )
                 message = (
                     f"ゴール条件充足により早期完了（残り予算{remaining}ラウンド）\n"
                     + "\n".join(
                         f"- {item.criterion}: {item.status} | {item.evidence}"
                         for item in verdict.criteria_status
                     )
+                    + review_line
                 ).strip()
                 self.discord.send(message, channel="important")
                 self._record(
@@ -1460,6 +1574,73 @@ class ResearchOrchestrator:
 
         if session.round_id == round_limit - 1 and session.mode == Mode.RESEARCH:
             session.next_round_task = FINAL_REPORT_TASK
+
+    def _update_stall_state(self, session: ResearchSession) -> None:
+        met_count = sum(
+            1 for item in session.last_criteria_status if item.get("status") == "met"
+        )
+        done_count = sum(
+            1
+            for entry in ExperimentStore(self.config.experiments_path(session.session_id)).read_all()
+            if entry.status == "done"
+        )
+        progressed = (
+            met_count > session.progress_met_count
+            or done_count > session.progress_done_experiments
+        )
+        session.stall_rounds = 0 if progressed else session.stall_rounds + 1
+        session.progress_met_count = met_count
+        session.progress_done_experiments = done_count
+        threshold = max(self.config.stall_round_threshold, 1)
+        if session.stall_rounds < threshold or session.stall_rounds % threshold != 0:
+            return
+        self._record(
+            session,
+            event_type="stall_detected",
+            decision=f"stall_rounds={session.stall_rounds}",
+        )
+        message = (
+            f"進捗停滞を検知（{session.stall_rounds}ラウンド連続でゴール条件充足・"
+            "実験完了が進んでいない）。方針転換を検討します。"
+        )
+        self.discord.send(message, channel="important")
+        pivot = self._stall_pivot_instruction(session)
+        if session.next_round_task.strip() and session.next_round_task.strip() != FINAL_REPORT_TASK:
+            session.next_round_task = session.next_round_task.rstrip() + "\n\n" + pivot
+        elif not session.next_round_task.strip():
+            session.next_round_task = pivot
+
+    def _stall_pivot_instruction(self, session: ResearchSession) -> str:
+        failed = [
+            entry
+            for entry in self._research_ledger(session).read_entries()
+            if entry.failure_class is not None
+        ][-3:]
+        if failed:
+            failed_lines = "\n".join(f"- {entry.action[:120]}" for entry in failed)
+        else:
+            failed_lines = "- （記録なし）"
+        return f"""【停滞検知】直近{session.stall_rounds}ラウンド、ゴール条件の充足が進んでいない。同じアプローチを繰り返さないこと。
+試して失敗したアプローチ（繰り返さない）:
+{failed_lines}
+原因を診断した上で、別ルート（別手法・別データ・課題の分割・スコープ縮小）を設計して実行する。"""
+
+    def _run_report_review(self, session: ResearchSession) -> ReviewResult:
+        review = self.report_reviewer.review(session, experiment_summary=self._experiment_summary(session))
+        session.last_report_review = {
+            "verdict": review.verdict,
+            "score": review.score,
+            "major_issues": list(review.major_issues),
+            "minor_issues": list(review.minor_issues),
+            "source": review.source,
+        }
+        return review
+
+    def _format_review_revision_task(self, review: ReviewResult) -> str:
+        issues = review.major_issues or ["重大指摘は空だが、査読結果はREVISEだった。根拠と再現情報を再確認する"]
+        return "査読指摘を解消し artifacts/report.md を改訂する:\n" + "\n".join(
+            f"- {item}" for item in issues
+        )
 
     def _apply_experiment_updates(self, session: ResearchSession, updates) -> None:
         if not updates:
@@ -1847,6 +2028,7 @@ class ResearchOrchestrator:
 - 実験の開始・完了時に experiments.jsonl に1行JSONを追記/更新する
 - experiments.jsonl のplannedバックログ優先度順に実験を消化し、status遷移（planned→running→done）とmetricsを必ず記録する
 - 結果を主張する前に必ず検証し、「検証:」セクションに方法を書く。検証していない事項は「未確認事項」へ
+- 過去の教訓ブロックがプロンプトに注入される。同じ失敗を繰り返さず、原因を診断して別ルートを試す
 - experiments.jsonl のフィールド: exp_id, name, hypothesis, status, round_id, metrics, dir, created_at, updated_at, success_metric, priority
 - 論文用の清書図は paper/figures/ へコピーする
 - 長時間ジョブ（クラウドGPU等）は投行→ジョブIDをnotes.mdとexperiments.jsonlに記録→後続ラウンドで結果回収、の非同期パターンを使う

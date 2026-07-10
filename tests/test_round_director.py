@@ -8,6 +8,7 @@ from harness.experiments import ExperimentEntry, ExperimentStore
 from harness.ledger import ResearchLedger
 from harness.modes import Mode
 from harness.orchestrator import ResearchOrchestrator
+from harness.report_review import ReviewResult
 from harness.round_director import CriterionStatus, DirectorVerdict, ExperimentUpdate, parse_director_output
 from harness.state import ResearchSession, utc_timestamp
 
@@ -56,6 +57,18 @@ class SequenceDirector:
         if len(self.verdicts) == 1:
             return self.verdicts[0]
         return self.verdicts.pop(0)
+
+
+class AcceptReviewer:
+    def review(self, *args, **kwargs):
+        return ReviewResult(
+            verdict="ACCEPT",
+            score=4,
+            major_issues=[],
+            minor_issues=[],
+            raw="raw",
+            source="llm",
+        )
 
 
 class RecordingRunner:
@@ -184,6 +197,7 @@ def test_done_with_existing_report_finishes_early(tmp_path):
             )
         ]
     )
+    orchestrator.report_reviewer = AcceptReviewer()
     session = _research_session(config, round_budget=5)
     config.report_path(session.session_id).write_text("# Report\n", encoding="utf-8")
     orchestrator.store.save(session)

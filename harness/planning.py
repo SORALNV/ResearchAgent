@@ -8,6 +8,28 @@ from harness.papers import Paper
 NOVELTY_BLOCKING_STATUSES = {"unclear", "crowded", "needs_human_decision"}
 
 
+def render_goal_criteria_for_plan(items: list[str]) -> str:
+    if not items:
+        return "- 未確定"
+    return "\n".join(f"C{index}. {item}" for index, item in enumerate(items, start=1))
+
+
+def render_redirects_and_constraints_for_plan(
+    redirects: list[str],
+    constraints: list[str],
+) -> str:
+    if not redirects and not constraints:
+        return "- なし"
+    return "\n".join(
+        [
+            "リダイレクト:",
+            *([f"- {item}" for item in redirects] or ["- なし"]),
+            "制約:",
+            *([f"- {item}" for item in constraints] or ["- なし"]),
+        ]
+    )
+
+
 def generate_planning_query(goal: str) -> str:
     words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]+", goal)
     if words:

@@ -19,7 +19,13 @@ from harness.modes import Mode
 from harness.paper_search import ArxivPaperSearchProvider, FakePaperSearchProvider, PaperSearchProvider
 from harness.papers import Paper, PaperStore
 from harness.planning_dialogue import PlanningDialogueRunner, parse_plan_update
-from harness.planning import build_planning_scout, generate_planning_query, render_planning_scout
+from harness.planning import (
+    build_planning_scout,
+    generate_planning_query,
+    render_goal_criteria_for_plan,
+    render_planning_scout,
+    render_redirects_and_constraints_for_plan,
+)
 from harness.reporting import render_report, render_run_summary, review_report
 from harness.research_brief import ResearchBriefWriter, render_research_brief
 from harness.round_director import RoundDirector
@@ -145,14 +151,20 @@ class ResearchOrchestrator:
             self._record(session, event_type="error", errors=[result.error])
             return message
         dialogue = result.text
-        session.accepted_ideas.append(f"PLANNING dialogue: {dialogue[:500]}")
+        display_text, plan_updates = parse_plan_update(dialogue)
+        update_summary = self._apply_plan_update(session, plan_updates)
+        session.accepted_ideas.append(f"PLANNING dialogue: {display_text[:500]}")
+        self.store.save(session)
         brief = self._brief_writer(session).write(session)
-        citation_footer = self._format_planning_citation_footer(session, dialogue, result.searches)
+        citation_footer = self._format_planning_citation_footer(session, display_text, result.searches)
+        result_text = display_text
+        if update_summary:
+            result_text = result_text.rstrip() + f"\n\n📌 プラン更新: {update_summary}"
         report = self._format_report(
             session,
             purpose="研究開始前の要件定義",
             did="新しい研究テーマを登録し、LLM判断に応じた類似研究検索と初回のオーケストレーション方針整理を実行した。",
-            result=dialogue,
+            result=result_text,
             verification="壁打ち内容、検索判断、取得できた類似研究情報をresearch_brief.mdとjournal.jsonlへ保存済み。",
             decision="PLANNING継続: 通常メッセージで壁打ちを続ける",
             confidence="mid",
@@ -165,11 +177,19 @@ class ResearchOrchestrator:
             decision="PLANNING継続",
             confidence="mid",
         )
+        if update_summary:
+            self._record(
+                session,
+                event_type="plan_structure_updated",
+                decision=update_summary,
+                confidence="high",
+                research_brief_snapshot=brief,
+            )
         self._record(
             session,
             event_type="planning_dialogue_completed",
             user_instruction=text,
-            main_agent_summary=dialogue,
+            main_agent_summary=display_text,
             decision="Soraの返答待ち",
             confidence="mid",
         )
@@ -307,6 +327,8 @@ class ResearchOrchestrator:
             session.transition_to(Mode.RESEARCH)
             session.completed_reason = None
             session.round_budget = session.round_id + self.config.max_rounds
+            if session.next_round_task == FINAL_REPORT_TASK:
+                session.next_round_task = ""
             session.next_action = "追加RESEARCHラウンドを再開する"
             self.store.save(session)
             self._record(
@@ -1643,6 +1665,8 @@ class ResearchOrchestrator:
 {bullet_values(session.goal_criteria)}
 - research_methods:
 {bullet_values(session.research_methods)}
+- 実行時制約（PLANで確定。必ず従う）:
+{bullet_values(session.constraints, "なし")}
 - open_questions:
 {bullet_values(session.open_questions, "なし")}
 - novelty_status: {novelty}
@@ -1679,13 +1703,17 @@ class ResearchOrchestrator:
         scout = session.planning_scout or {}
         primary = scout.get("primary_comparison") or {}
         accepted = "\n".join(f"- {item}" for item in session.accepted_ideas[-12:]) or "- なし"
-        goal_criteria = "\n".join(f"- {item}" for item in session.goal_criteria) or "- 未確定"
+        goal_criteria = render_goal_criteria_for_plan(session.goal_criteria)
         research_methods = "\n".join(f"- {item}" for item in session.research_methods) or "- 未確定"
         open_questions = "\n".join(f"- {item}" for item in session.open_questions) or "- なし"
-        redirects = "\n".join(f"- {item}" for item in session.redirects) or "- なし"
+        redirects_and_constraints = render_redirects_and_constraints_for_plan(
+            session.redirects,
+            session.constraints,
+        )
         return f"""# Research Plan
 
 ## Handoff
+- project_name: {session.project_name}
 - plan_model: {self.config.plan_agent_model}
 - effective_plan_model: {effective_model_name(self.config.plan_agent_model)}
 - research_model: {self.config.research_agent_model}
@@ -1718,7 +1746,7 @@ class ResearchOrchestrator:
 {open_questions}
 
 ## Redirects And Constraints
-{redirects}
+{redirects_and_constraints}
 
 ## Next Step For Researching
 {session.next_action or "未設定"}
@@ -1895,18 +1923,33 @@ class ResearchOrchestrator:
         counts = {
             "ゴール条件": 0,
             "方法": 0,
+            "制約": 0,
+            "研究名": 0,
             "確認事項": 0,
             "解決": 0,
             "記憶": 0,
         }
-        for item in updates.get("goal_criteria", []):
-            if item not in session.goal_criteria:
-                session.goal_criteria.append(item)
-                counts["ゴール条件"] += 1
-        for item in updates.get("research_methods", []):
-            if item not in session.research_methods:
-                session.research_methods.append(item)
-                counts["方法"] += 1
+        if "goal_criteria" in updates:
+            new_goal_criteria = list(updates.get("goal_criteria", []))
+            if session.goal_criteria != new_goal_criteria:
+                session.goal_criteria = new_goal_criteria
+                counts["ゴール条件"] = len(new_goal_criteria)
+        if "research_methods" in updates:
+            new_research_methods = list(updates.get("research_methods", []))
+            if session.research_methods != new_research_methods:
+                session.research_methods = new_research_methods
+                counts["方法"] = len(new_research_methods)
+        for item in updates.get("constraints", []):
+            if item not in session.constraints:
+                session.constraints.append(item)
+                counts["制約"] += 1
+        project_names = updates.get("project_name", [])
+        if project_names and session.project_name in {"", "Research Harness MVP"}:
+            project_name = project_names[-1]
+            if project_name and session.project_name != project_name:
+                session.project_name = project_name
+                self._rename_untitled_research_dir(session)
+                counts["研究名"] += 1
         for item in updates.get("open_questions", []):
             if item not in session.open_questions:
                 session.open_questions.append(item)
@@ -1944,6 +1987,27 @@ class ResearchOrchestrator:
         if counts["解決"] > 0:
             labels.append(f"確認事項-{counts['解決']}")
         return ", ".join(labels)
+
+    def _rename_untitled_research_dir(self, session: ResearchSession) -> None:
+        if not session.research_dir:
+            return
+        from pathlib import Path
+
+        from harness.config import _slugify
+
+        current = Path(session.research_dir)
+        if not current.name.endswith("_untitled-research") or not current.exists():
+            return
+        prefix = f"{session.version_label}_{session.session_id}_"
+        if session.version_label and current.name.startswith(prefix):
+            target_name = f"{prefix}{_slugify(session.project_name)}"
+        else:
+            target_name = current.name.removesuffix("untitled-research") + _slugify(session.project_name)
+        target = current.with_name(target_name)
+        if target == current or target.exists():
+            return
+        current.rename(target)
+        session.research_dir = str(target)
 
 
 def _format_paper_line(paper: Paper) -> str:

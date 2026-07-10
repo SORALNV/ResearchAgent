@@ -116,6 +116,7 @@ class RoundDirector:
     ) -> str:
         criteria = _numbered_items(session.goal_criteria, empty="未確定")
         methods = _bullet_items(session.research_methods, empty="未確定")
+        constraints = _bullet_items(session.constraints, empty="なし")
         questions = _bullet_items(session.open_questions, empty="なし")
         remaining = max(round_limit - round_number, 0)
         return f"""あなたは研究ディレクター。subエージェントのラウンド結果を検証し、次の一手を決める。
@@ -130,6 +131,9 @@ class RoundDirector:
 
 研究方法:
 {methods}
+
+実行時制約（PLANで確定。必ず従う）:
+{constraints}
 
 未解決の確認事項:
 {questions}

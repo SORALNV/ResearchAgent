@@ -15,6 +15,8 @@ from harness.state import ResearchSession
 PLAN_UPDATE_KEYS = {
     "GOAL_CRITERIA": "goal_criteria",
     "METHOD": "research_methods",
+    "CONSTRAINT": "constraints",
+    "PROJECT_NAME": "project_name",
     "OPEN_QUESTION": "open_questions",
     "RESOLVED_QUESTION": "resolved_questions",
     "REMEMBER": "remembers",
@@ -34,6 +36,8 @@ def parse_plan_update(text: str) -> tuple[str, dict[str, list[str]]]:
     updates: dict[str, list[str]] = {
         "goal_criteria": [],
         "research_methods": [],
+        "constraints": [],
+        "project_name": [],
         "open_questions": [],
         "resolved_questions": [],
         "remembers": [],
@@ -337,6 +341,7 @@ class PlanningDialogueRunner:
     def _build_initial_prompt(self, session: ResearchSession, user_text: str, dialogue_summary: str = "") -> str:
         goal_criteria = _render_items(session.goal_criteria, "未確定")
         research_methods = _render_items(session.research_methods, "未確定")
+        constraints = _render_items(session.constraints, "なし")
         open_questions = _render_items(session.open_questions, "なし")
         summary_block = f"\nこれまでの会話の要約:\n{dialogue_summary}\n" if dialogue_summary else ""
         memory_digest = AgentMemory(self.config.agent_memory_path).digest()
@@ -374,6 +379,9 @@ class PlanningDialogueRunner:
 - 類似研究・文献を調べたい場合は、返答の最後に SEARCH_QUERY: <英語クエリ> 行を最大2つ付ける
 - ハーネスが検索を実行し、結果を次のメッセージで渡す。必要なときだけ使う
 - ユーザーとの合意が取れた項目、またはユーザーが明示指定した方法・条件があれば、返答の最後にPLAN_UPDATEブロックで記録する。合意していないものは書かない
+- GOAL_CRITERIA / METHOD を書く時は、確定済みの全項目を毎回すべて列挙する。差分ではなく全量であり、書き漏れた項目は削除される。同じ内容の言い換えを別項目として増やさない。条件を洗練したい場合は置き換え後の全量を書く
+- ユーザーが実行環境・認証方式・プロジェクトID・予算などの実行時制約を伝えたら CONSTRAINT: <1行> で必ず記録する
+- 研究テーマが定まったら PROJECT_NAME: <日本語または英語の短い研究名（30字以内）> を1回だけ出す
 - PLAN_UPDATEブロックは字数制限の外とする
 - あなた側で研究を進める上で明確にしておきたい点があればOPEN_QUESTIONとして記録し、会話の中でユーザーに聞く。解決したらRESOLVED_QUESTIONで消す
 - 会話の中でユーザーの恒久的な好み・環境制約・重要な決定を知ったら、PLAN_UPDATEブロックに REMEMBER: <1行> を含めてよい。本当に今後も使う事実だけを書く
@@ -382,6 +390,8 @@ PLAN_UPDATE形式:
 PLAN_UPDATE:
 GOAL_CRITERIA: <ゴール条件1行>
 METHOD: <研究方法1行>
+CONSTRAINT: <実行時制約1行>
+PROJECT_NAME: <短い研究名>
 OPEN_QUESTION: <確認したい点1行>
 RESOLVED_QUESTION: <解決した確認事項の本文>
 REMEMBER: <今後も使う恒久的な記憶1行>
@@ -394,6 +404,8 @@ REMEMBER: <今後も使う恒久的な記憶1行>
 {goal_criteria}
 確定済み研究方法:
 {research_methods}
+確定済み実行時制約:
+{constraints}
 未解決の確認事項:
 {open_questions}
 

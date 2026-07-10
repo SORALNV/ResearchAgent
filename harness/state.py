@@ -82,6 +82,7 @@ class ResearchSession:
     open_questions: list[str] = field(default_factory=list)
     start_warning_issued: bool = False
     redirects: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
     approval_requests: dict[str, ApprovalRequest] = field(default_factory=dict)
     approvals_received: list[str] = field(default_factory=list)
     cost: CostState = field(default_factory=CostState)
@@ -162,6 +163,7 @@ class ResearchSession:
             open_questions=list(data.get("open_questions", [])),
             start_warning_issued=bool(data.get("start_warning_issued", False)),
             redirects=list(data.get("redirects", [])),
+            constraints=list(data.get("constraints", [])),
             approval_requests=approval_requests,
             approvals_received=list(data.get("approvals_received", [])),
             cost=CostState(**data.get("cost", {})),

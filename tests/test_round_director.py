@@ -294,6 +294,24 @@ def test_experiment_ids_are_added_to_ledger_evidence(tmp_path):
     assert rows[0]["evidence_ids"] == ["P-001", "EXP-001"]
 
 
+def test_restart_after_done_clears_stale_final_report_task(tmp_path):
+    config = _config(tmp_path, max_rounds=2)
+    runner = RecordingRunner(config)
+    orchestrator = ResearchOrchestrator(config, discord=FakeDiscordAdapter(), runner=runner)
+    orchestrator.round_director = SequenceDirector([_verdict("BLOCKED", reason="停止")])
+    session = _research_session(config, round_budget=2)
+    session.round_id = 2
+    session.transition_to(Mode.DONE)
+    session.completed_reason = "MAX_ROUNDS reached"
+    session.next_round_task = FINAL_REPORT_TASK
+    orchestrator.store.save(session)
+
+    orchestrator.start()
+
+    assert runner.subtasks
+    assert runner.subtasks[0] != FINAL_REPORT_TASK
+
+
 class ApprovalRunner(RecordingRunner):
     def run_round(self, session):
         from harness.approval import ProposedOperation

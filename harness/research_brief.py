@@ -16,6 +16,7 @@ def render_research_brief(session: ResearchSession) -> str:
     research_methods = "\n".join(f"- {item}" for item in session.research_methods) or "- 未確定"
     open_questions = "\n".join(f"- {item}" for item in session.open_questions) or "- なし"
     redirects = "\n".join(f"- {item}" for item in session.redirects) or "- なし"
+    constraints = "\n".join(f"- {item}" for item in session.constraints) or "- なし"
     approvals = "\n".join(
         f"- {item.approval_id}: {item.operation} ({item.status})"
         for item in session.approval_requests.values()
@@ -62,6 +63,10 @@ def render_research_brief(session: ResearchSession) -> str:
 {session.current_question or "未設定"}
 
 ## Constraints And Redirects
+### Constraints
+{constraints}
+
+### Redirects
 {redirects}
 
 ## Accepted Ideas

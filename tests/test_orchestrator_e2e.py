@@ -4,6 +4,7 @@ from harness.config import HarnessConfig
 from harness.discord_adapter import FakeDiscordAdapter
 from harness.modes import Mode
 from harness.orchestrator import ResearchOrchestrator
+from harness.papers import make_paper
 from harness.planning_dialogue import DialogueTurnResult
 
 
@@ -38,6 +39,13 @@ GOAL_CRITERIA: 研究ハーネスMVPのE2E動作を確認できたら成功""",
             ["research harness agent evaluation"],
             "",
         )
+
+
+class EmptyPaperProvider:
+    name = "empty"
+
+    def search(self, query, max_results=5):
+        return []
 
 
 def test_goal_to_start_approval_approve_stop_e2e(tmp_path):
@@ -288,6 +296,39 @@ def test_research_discuss_runs_llm_chosen_search_query(tmp_path):
     second = discord.inject_message(orchestrator, "続きを相談したい")
     assert second.ok
     assert "https://example.test/papers/research-harnesses" not in second.message
+
+
+def test_planning_scout_does_not_reuse_stale_papers_when_current_search_is_empty(tmp_path):
+    orchestrator, discord, _ = make_orchestrator(tmp_path)
+    discord.inject(orchestrator, "/re new")
+    discord.inject(orchestrator, "/re plan")
+    discord.inject_message(orchestrator, "GeminiEmbedding2について")
+    session = orchestrator.store.load()
+    store = orchestrator._paper_store(session)
+    store.upsert_many(
+        [
+            make_paper(
+                title="Irrelevant Natural Language Code Generation Paper",
+                authors=["A. Author"],
+                year=2023,
+                venue="arXiv",
+                url="http://arxiv.org/abs/2306.06371v1",
+                doi=None,
+                arxiv_id="2306.06371v1",
+                abstract="Java code generation from natural language text.",
+                source="arxiv",
+                relevance_score=1.0,
+                confidence="mid",
+            )
+        ]
+    )
+    orchestrator.paper_provider = EmptyPaperProvider()
+
+    orchestrator._run_planning_scout(session, "Gemini Embedding 2 video search", send_discord=False)
+
+    session = orchestrator.store.load()
+    assert session.planning_scout["similar_research"] == []
+    assert session.planning_scout["novelty_status"] == "unclear"
 
 
 def test_custom_research_archive_dir_is_used(tmp_path):

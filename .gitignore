@@ -19,3 +19,6 @@ journal.jsonl
 .idea/
 dist/
 build/
+
+# agent runtime long-term memory (data, not code)
+agent_memory/

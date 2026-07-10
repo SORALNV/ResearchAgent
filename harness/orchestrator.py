@@ -886,8 +886,8 @@ class ResearchOrchestrator:
             return f"類似研究スカウトに失敗しました: {exc}"
         store = self._paper_store(session)
         inserted, updated = store.upsert_many(candidates)
-        papers = store.read_all()
-        scout = build_planning_scout(session.research_goal, query, papers)
+        scout_papers = inserted + updated
+        scout = build_planning_scout(session.research_goal, query, scout_papers)
         session.planning_scout = scout
         session.current_question = "類似研究を踏まえた研究スコープ決定"
         if scout.get("blocking"):
@@ -1271,7 +1271,11 @@ class ResearchOrchestrator:
                 session,
                 purpose="停止条件の確認",
                 did="MAX_ROUNDSに達した。",
-                result="MockAgentRunnerの研究ラウンドを完了した。",
+                result=(
+                    "実subエージェントの研究ラウンドを完了した。"
+                    if self.config.sub_agent_command
+                    else "MockAgentRunnerの研究ラウンドを完了した。"
+                ),
                 verification="journal.jsonlに各ラウンドを記録済み。",
                 decision="DONE",
                 confidence="high",

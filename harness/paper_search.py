@@ -4,6 +4,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+import re
 from typing import Protocol
 
 from harness.papers import Paper, make_paper
@@ -86,7 +87,7 @@ class ArxivPaperSearchProvider:
         )
         with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
             xml_body = response.read()
-        return self._parse(xml_body, max_results)
+        return _rank_and_filter_by_query(self._parse(xml_body, max_results), query, max_results)
 
     def _parse(self, xml_body: bytes, max_results: int) -> list[Paper]:
         ns = {
@@ -134,3 +135,77 @@ def _text(element: ET.Element, path: str, ns: dict[str, str]) -> str:
         return ""
     return " ".join(found.text.split())
 
+
+_QUERY_STOPWORDS = {
+    "about",
+    "docs",
+    "documentation",
+    "natural",
+    "language",
+    "official",
+    "paper",
+    "papers",
+    "possible",
+    "research",
+    "search",
+    "study",
+    "using",
+    "with",
+}
+
+
+def _rank_and_filter_by_query(papers: list[Paper], query: str, max_results: int) -> list[Paper]:
+    significant_terms = _significant_query_terms(query)
+    if not significant_terms:
+        return papers[:max_results]
+
+    ranked: list[tuple[float, Paper]] = []
+    for paper in papers:
+        score = _lexical_relevance_score(paper, significant_terms)
+        if score <= 0:
+            continue
+        paper.relevance_score = score
+        ranked.append((score, paper))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [paper for _, paper in ranked[:max_results]]
+
+
+def _significant_query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for token in _tokens(query):
+        if len(token) < 4 or token in _QUERY_STOPWORDS:
+            continue
+        if token not in terms:
+            terms.append(token)
+    return terms
+
+
+def _lexical_relevance_score(paper: Paper, significant_terms: list[str]) -> float:
+    haystack = set(
+        _tokens(
+            " ".join(
+                [
+                    paper.title,
+                    paper.abstract,
+                    paper.venue or "",
+                    paper.arxiv_id or "",
+                    paper.doi or "",
+                ]
+            )
+        )
+    )
+    matched = sum(1 for term in significant_terms if term in haystack)
+    if len(significant_terms) >= 3 and matched < 2:
+        return 0.0
+    if matched == 0:
+        return 0.0
+    return matched / len(significant_terms)
+
+
+def _tokens(text: str) -> list[str]:
+    tokens = []
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]+", text.lower()):
+        tokens.append(token)
+        if token.endswith("s") and len(token) > 4:
+            tokens.append(token[:-1])
+    return tokens

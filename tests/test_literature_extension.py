@@ -4,7 +4,8 @@ from harness.config import HarnessConfig
 from harness.discord_adapter import FakeDiscordAdapter
 from harness.modes import Mode
 from harness.orchestrator import ResearchOrchestrator
-from harness.paper_search import ArxivPaperSearchProvider
+from harness.paper_search import ArxivPaperSearchProvider, _rank_and_filter_by_query
+from harness.papers import make_paper
 
 
 def make_orchestrator(tmp_path, **overrides):
@@ -121,3 +122,56 @@ def test_arxiv_provider_parses_atom_xml():
     assert papers[0].year == 2024
     assert papers[0].arxiv_id == "2401.00001v1"
     assert papers[0].doi == "10.1234/example"
+
+
+def test_arxiv_filter_drops_irrelevant_broad_nlp_hits():
+    papers = [
+        make_paper(
+            title="A Comprehensive Review of State-of-The-Art Methods for Java Code Generation from Natural Language Text",
+            authors=["A. Author"],
+            year=2023,
+            venue="arXiv",
+            url="http://arxiv.org/abs/2306.06371v1",
+            doi=None,
+            arxiv_id="2306.06371v1",
+            abstract="Java code generation from natural language text using Transformer models.",
+            source="arxiv",
+            relevance_score=1.0,
+            confidence="mid",
+        )
+    ]
+
+    filtered = _rank_and_filter_by_query(
+        papers,
+        "Gemini Embedding 2 video search natural language official docs",
+        max_results=5,
+    )
+
+    assert filtered == []
+
+
+def test_arxiv_filter_keeps_semantically_matching_hits():
+    papers = [
+        make_paper(
+            title="Multimodal Embeddings for Video Retrieval",
+            authors=["A. Author"],
+            year=2025,
+            venue="arXiv",
+            url="http://arxiv.org/abs/2501.00001v1",
+            doi=None,
+            arxiv_id="2501.00001v1",
+            abstract="We study video retrieval with multimodal embedding models and text queries.",
+            source="arxiv",
+            relevance_score=1.0,
+            confidence="mid",
+        )
+    ]
+
+    filtered = _rank_and_filter_by_query(
+        papers,
+        "multimodal embeddings video retrieval",
+        max_results=5,
+    )
+
+    assert len(filtered) == 1
+    assert filtered[0].relevance_score > 0

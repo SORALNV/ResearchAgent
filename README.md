@@ -28,6 +28,16 @@ The harness records and routes work. It should avoid pretending to be the resear
 - session cost counters and hard-limit blocking
 - simple golden-question evaluation
 
+## 実験バックログとFable的試行錯誤
+
+`/re start` の初回RESEARCH移行では、確定した `plan.md` から `experiments.jsonl` に初期実験バックログを生成します。生成モデルは `ROADMAP_MODEL` で指定でき、未指定なら `RESEARCH_AGENT_MODEL` を使います。
+
+各実験は `planned -> running -> done` の順に更新し、`success_metric` と `priority` を持ちます。subエージェントは明示タスクがない限り、優先度順の `planned` 実験から着手し、完了時に実測 `metrics` を記録します。
+
+ラウンド後のDirectorは、結果に応じてバックログへ `add` または `retire` を提案できます。`met` 判定には具体的な証拠が必要で、証拠が空の `met` は `partial` に降格されます。`DONE` も全criteriaが `met` でなければ `CONTINUE` に戻され、証拠なしに完了を主張できません。
+
+subエージェントのハード失敗（timeout、非ゼロ終了、空stdout）は `MAX_ROUND_RETRIES` 回まで即時リトライします。再試行時は前回失敗の末尾を渡し、別ルートの回避策を試すよう促します。
+
 ## Setup
 
 ```bash

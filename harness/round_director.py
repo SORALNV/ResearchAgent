@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from harness.config import HarnessConfig, effective_model_name
 from harness.state import ResearchSession
@@ -21,6 +21,17 @@ class CriterionStatus:
 
 
 @dataclass
+class ExperimentUpdate:
+    op: str
+    name: str = ""
+    hypothesis: str = ""
+    success_metric: str = ""
+    priority: str = ""
+    exp_id: str = ""
+    reason: str = ""
+
+
+@dataclass
 class DirectorVerdict:
     decision: str
     criteria_status: list[CriterionStatus]
@@ -29,6 +40,7 @@ class DirectorVerdict:
     reason: str
     raw: str
     source: str
+    experiment_updates: list[ExperimentUpdate] = field(default_factory=list)
 
 
 class RoundDirector:
@@ -43,6 +55,7 @@ class RoundDirector:
         subtask: str,
         sub_output: str,
         experiment_summary: str,
+        backlog_summary: str = "",
     ) -> DirectorVerdict:
         command = self._build_command(session)
         prompt = self._build_prompt(
@@ -52,6 +65,7 @@ class RoundDirector:
             subtask=subtask,
             sub_output=sub_output,
             experiment_summary=experiment_summary,
+            backlog_summary=backlog_summary,
         )
         try:
             completed = subprocess.run(
@@ -113,6 +127,7 @@ class RoundDirector:
         subtask: str,
         sub_output: str,
         experiment_summary: str,
+        backlog_summary: str,
     ) -> str:
         criteria = _numbered_items(session.goal_criteria, empty="未確定")
         methods = _bullet_items(session.research_methods, empty="未確定")
@@ -151,9 +166,14 @@ subの出力（先頭8000字）:
 実験台帳サマリ:
 {experiment_summary}
 
+実験バックログ（planned）:
+{backlog_summary or "なし"}
+
 判断規範:
 - 証拠（実測値・ファイル・出典）に基づいて criteria を判定する。subの自己申告を鵜呑みにしない
+- criterionをmetにできるのは、evidenceに具体的な裏付け（EXP-xxxの実測値、ファイルパス、P-xxx出典）を書ける場合だけ。検証の記述が無い結果はpartial止まり
 - 未検証の主張・矛盾・過度な一般化を critique で指摘する
+- 結果に応じてバックログを手入れする: 新たに必要な実験はadd、無意味になったplanned実験はretire
 - next_task は「subが1ラウンドで実行可能な具体的作業」1〜3文。前ラウンドの失敗や未確認事項の解消を優先する
 - 全criteriaがmetで最終レポート（artifacts/report.md）が最新なら DONE
 - 残りラウンドが少なく統合レポートが未執筆なら FINAL_REPORT
@@ -167,6 +187,9 @@ CRITIQUE: <2〜4行。改行可>
 DECISION: CONTINUE|FINAL_REPORT|DONE|BLOCKED
 NEXT_TASK: <1〜3文。DONE/BLOCKEDなら「なし」>
 REASON: <1〜2行>
+EXPERIMENTS_UPDATE:
+- add: <name> | <仮説> | <成功指標> | <high|mid|low>
+- retire: <EXP-xxx> | <理由>
 """
 
 
@@ -183,7 +206,49 @@ def parse_director_output(text: str) -> DirectorVerdict:
         reason=_section_text(text, "REASON"),
         raw=text,
         source="llm",
+        experiment_updates=_parse_experiment_updates(text),
     )
+
+
+def _parse_experiment_updates(text: str) -> list[ExperimentUpdate]:
+    updates: list[ExperimentUpdate] = []
+    capture = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _heading_name(stripped) == "EXPERIMENTS_UPDATE":
+            capture = True
+            continue
+        if capture and _heading_name(stripped):
+            break
+        if not capture:
+            continue
+        match = re.match(r"^[-*]\s*(add|retire)\s*[:：]\s*(.+)$", stripped, flags=re.IGNORECASE)
+        if not match:
+            continue
+        op = match.group(1).lower()
+        payload = match.group(2).strip()
+        if op == "add":
+            parts = [part.strip() for part in payload.split("|", 3)]
+            if len(parts) != 4:
+                continue
+            priority = parts[3].lower()
+            if priority not in {"high", "mid", "low"}:
+                priority = "mid"
+            updates.append(
+                ExperimentUpdate(
+                    op="add",
+                    name=parts[0],
+                    hypothesis=parts[1],
+                    success_metric=parts[2],
+                    priority=priority,
+                )
+            )
+            continue
+        parts = [part.strip() for part in payload.split("|", 1)]
+        if len(parts) != 2:
+            continue
+        updates.append(ExperimentUpdate(op="retire", exp_id=parts[0], reason=parts[1]))
+    return updates
 
 
 def _parse_criteria(text: str) -> list[CriterionStatus]:

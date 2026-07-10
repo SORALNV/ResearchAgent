@@ -151,8 +151,9 @@ class MockAgentRunner:
                 "artifacts/round1_notes.md に記録する"
             )
         return (
-            "前ラウンドの成果物と課題を確認し、実験・分析を実行して中間結果"
-            f"（数値・観察）を artifacts/round{round_number}_notes.md に記録する"
+            "実験バックログから優先度最高のplanned実験を実行し、結果と検証を "
+            f"artifacts/round{round_number}_notes.md に記録する。"
+            "前ラウンドの成果物と課題も確認し、未確認事項の解消を優先する"
         )
 
     def _review_sub_agent_output(self, output: str) -> str:
@@ -176,38 +177,61 @@ class SubAgentCommandRunner:
         self.config = config
 
     def run(self, session: ResearchSession, round_number: int, task: str) -> str:
-        if self.config.max_agent_calls > 0 and session.cost.agent_calls >= self.config.max_agent_calls:
-            return (
-                "Real sub-agent skipped: MAX_AGENT_CALLS reached. "
-                "続行するには設定変更または承認が必要。"
-            )
-        session.cost.agent_calls += 1
         command = self._build_command(session)
         prompt = self._build_prompt(session, round_number, task)
-        try:
-            completed = subprocess.run(
-                command,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=self.config.max_command_seconds,
-                cwd=session.research_dir or str(self.config.project_root),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return (
-                "Real sub-agent timeout: "
-                f"{self.config.sub_agent_command} exceeded {self.config.max_command_seconds}s. "
-                "結果は未確認。"
-            )
-        stdout = completed.stdout.strip()
-        stderr = completed.stderr.strip()
-        if completed.returncode != 0:
-            return (
-                f"Real sub-agent failed: returncode={completed.returncode}. "
-                f"stdout={stdout[-1200:] or 'なし'} stderr={stderr[-1200:] or 'なし'}"
-            )
-        return stdout or "Real sub-agent completed without output. 結果は未確認。"
+        max_retries = max(self.config.max_round_retries, 0)
+        failure = ""
+        for attempt in range(max_retries + 1):
+            if self.config.max_agent_calls > 0 and session.cost.agent_calls >= self.config.max_agent_calls:
+                return (
+                    "Real sub-agent skipped: MAX_AGENT_CALLS reached. "
+                    "続行するには設定変更または承認が必要。"
+                )
+            if attempt > 0:
+                prompt = (
+                    self._build_prompt(session, round_number, task)
+                    + "\n\n【前回試行の失敗】\n"
+                    + failure[-2000:]
+                    + "\n原因を診断し、アプローチを変えて再試行する。"
+                    "同じ操作をそのまま繰り返さない。環境要因なら回避策"
+                    "（別ライブラリ、縮小データ、代替手段）を試す。"
+                )
+            session.cost.agent_calls += 1
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.config.max_command_seconds,
+                    cwd=session.research_dir or str(self.config.project_root),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                failure = (
+                    "Real sub-agent timeout: "
+                    f"{self.config.sub_agent_command} exceeded {self.config.max_command_seconds}s. "
+                    "結果は未確認。"
+                )
+                continue
+            stdout = completed.stdout.strip()
+            stderr = completed.stderr.strip()
+            if completed.returncode != 0:
+                failure = (
+                    f"Real sub-agent failed: returncode={completed.returncode}. "
+                    f"stdout={stdout[-1200:] or 'なし'} stderr={stderr[-1200:] or 'なし'}"
+                )
+                continue
+            if not stdout:
+                failure = "Real sub-agent completed without output. 結果は未確認。"
+                continue
+            if attempt > 0:
+                return f"(リトライ{attempt}回目で成功)\n{stdout}"
+            return stdout
+        return failure or (
+            "Real sub-agent failed: unknown error. "
+            "結果は未確認。"
+        )
 
     def _build_command(self, session: ResearchSession) -> list[str]:
         assert self.config.sub_agent_command is not None
@@ -266,8 +290,10 @@ class SubAgentCommandRunner:
 - レポートから図を参照する場合は、artifacts/report.md からの相対パス（figures/xxx.png）を使う
 - matplotlib が使えない場合や図が不適な場合は、markdown表・mermaid記法で代替する
 - 文献に基づく主張には papers.jsonl の出典ID [P-xxx] を付ける。根拠が無い主張は「未確認」と明示する
+- taskに特段の指定が無い限り、実験バックログの優先度最高のplanned実験から着手する。着手時に該当exp_idのstatusをrunning、完了時にdone+metricsをexperiments.jsonlで更新する（新しいexp_idを作らない）
+- 結果を主張する前に必ず検証する: 生成したファイルは開いて中身を確認し、数値は再実行または再計算で確かめる。何をどう検証したかを返答の『検証:』セクションに書く。検証していない事項は『未確認事項』に正直に書く
 - 実験を実行する場合は、1実験=1フォルダ experiments/EXP-xxx_<短い英語slug>/ を作る。中身は config.json（パラメータ・シード・日時・仮説）、results/（数値結果CSV/JSON）、figures/（この実験の図）、notes.md（何をどう実行し何を観察したか）
-- 実験を開始・完了したら experiments.jsonl に1行JSONを追記または更新する。形式: {{"exp_id": "EXP-001", "name": "...", "hypothesis": "...", "status": "planned|running|done|failed", "round_id": N, "metrics": {{}}, "dir": "experiments/EXP-001_...", "created_at": "...", "updated_at": "..."}}。既存の行のexp_idと重複しない次の番号を使う
+- 実験を開始・完了したら experiments.jsonl に1行JSONを追記または更新する。形式: {{"exp_id": "EXP-001", "name": "...", "hypothesis": "...", "status": "planned|running|done|failed|retired", "round_id": N, "metrics": {{}}, "dir": "experiments/EXP-001_...", "created_at": "...", "updated_at": "...", "success_metric": "...", "priority": "high|mid|low|"}}。plannedを使う場合は既存の行を更新し、新しいexp_idを作らない
 - 論文用に清書した図は paper/figures/ にコピーする
 - 最終レポート artifacts/report.md は次の構成で書く: タイトル / Summary / 背景と目的（ゴール条件を明記）/ 方法 / 結果（図表を含む）/ 考察 / 限界と未確認事項 / 次のステップ / 参考文献（URL付き）
 
@@ -321,7 +347,18 @@ artifacts内の既存ファイル:
         if not entries:
             return "なし"
         lines = []
-        for entry in entries[-10:]:
+        planned = store.planned_backlog()[:5]
+        if planned:
+            lines.append("実験バックログ（planned、優先度順）:")
+            for entry in planned:
+                lines.append(
+                    f"{entry.exp_id} [{entry.priority or '-'}] {entry.name}: "
+                    f"{entry.hypothesis[:80]} success_metric={entry.success_metric or '未設定'}"
+                )
+        executed = [entry for entry in entries if entry.status != "planned"][-8:]
+        if executed:
+            lines.append("実行済み/進行中:")
+        for entry in executed:
             hypothesis = entry.hypothesis[:80]
             metrics = entry.metrics if entry.metrics else {}
             lines.append(

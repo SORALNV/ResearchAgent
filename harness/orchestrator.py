@@ -12,7 +12,7 @@ from harness.cost import CostManager
 from harness.doctor import render_doctor, run_doctor
 from harness.discord_adapter import DiscordAdapter, FakeDiscordAdapter
 from harness.eval import run_golden_eval
-from harness.experiments import ExperimentStore
+from harness.experiments import ExperimentEntry, ExperimentStore
 from harness.journal import Journal
 from harness.ledger import ResearchLedger
 from harness.modes import Mode
@@ -28,6 +28,7 @@ from harness.planning import (
 )
 from harness.reporting import render_report, render_run_summary, review_report
 from harness.research_brief import ResearchBriefWriter, render_research_brief
+from harness.roadmap import ExperimentRoadmapPlanner
 from harness.round_director import RoundDirector
 from harness.state import PhaseGate, ResearchSession, SessionStore, utc_timestamp
 
@@ -48,6 +49,7 @@ class ResearchOrchestrator:
         self.runner = runner or MockAgentRunner(config)
         self.planning_dialogue = PlanningDialogueRunner(config)
         self.round_director = RoundDirector(self.config) if self.config.sub_agent_command else None
+        self.roadmap_planner = ExperimentRoadmapPlanner(config) if self.config.sub_agent_command else None
 
     def handle(
         self,
@@ -364,6 +366,8 @@ class ResearchOrchestrator:
                 discord_report=message,
             )
             return message
+        if session.round_id == 0:
+            self._generate_initial_experiment_roadmap(session)
         plan_path = self._write_plan_md(session)
         agents_path = self._write_agents_md(session)
         session.transition_to(Mode.RESEARCH)
@@ -396,10 +400,16 @@ class ResearchOrchestrator:
             main_agent_summary="現在状態を表示",
             confidence="high",
         )
+        criteria_line = ""
+        if session.last_criteria_status:
+            total = len(session.last_criteria_status)
+            met = sum(1 for item in session.last_criteria_status if item.get("status") == "met")
+            criteria_line = f"条件充足: met {met}/{total}\n"
         return (
             f"モード: {session.mode.value}\n"
             f"現在の問い: {session.current_question or '未設定'}\n"
             f"進捗: round {session.round_id}/{session.round_budget or self.config.max_rounds}\n"
+            f"{criteria_line}"
             f"次の一手: {session.next_action or '未設定'}\n"
             f"承認待ち: {', '.join(pending) if pending else 'なし'}"
         )
@@ -1298,6 +1308,7 @@ class ResearchOrchestrator:
                     output.subtask,
                     output.sub_agent_output,
                     self._experiment_summary(session),
+                    self._planned_backlog_summary(session, limit=8),
                 )
                 self._apply_director_verdict(session, verdict, round_limit)
             report = self._handle_round_output(session, output, verdict)
@@ -1316,8 +1327,12 @@ class ResearchOrchestrator:
                     "実subエージェントの研究ラウンドを完了した。"
                     if self.config.sub_agent_command
                     else "MockAgentRunnerの研究ラウンドを完了した。"
+                )
+                + self._max_rounds_unmet_criteria_note(session),
+                verification=(
+                    "journal.jsonlに各ラウンドを記録済み。"
+                    + self._max_rounds_unmet_criteria_note(session)
                 ),
-                verification="journal.jsonlに各ラウンドを記録済み。",
                 decision="DONE",
                 confidence="high",
             )
@@ -1339,7 +1354,43 @@ class ResearchOrchestrator:
         verdict,
         round_limit: int,
     ) -> None:
+        for item in verdict.criteria_status:
+            if item.status == "met" and not item.evidence.strip():
+                item.status = "partial"
+                self._record(
+                    session,
+                    event_type="evidence_gate_downgraded",
+                    decision=f"{item.criterion}: met -> partial",
+                    confidence=verdict.source,
+                )
+        if verdict.decision == "DONE":
+            unmet = [
+                item
+                for item in verdict.criteria_status
+                if item.status != "met"
+            ]
+            if not verdict.criteria_status or unmet:
+                reason = (
+                    "criteria_status empty"
+                    if not verdict.criteria_status
+                    else "unmet criteria: " + ", ".join(item.criterion for item in unmet)
+                )
+                verdict.decision = "CONTINUE"
+                if not verdict.next_task.strip():
+                    unmet_names = ", ".join(item.criterion for item in unmet) or "未判定"
+                    verdict.next_task = (
+                        f"未達のゴール条件（{unmet_names}）を裏付ける実験・検証を、"
+                        "実験バックログの優先度順に実行する"
+                    )
+                self._record(
+                    session,
+                    event_type="done_gate_rejected",
+                    decision=reason,
+                    confidence=verdict.source,
+                )
         criteria_status = [asdict(item) for item in verdict.criteria_status]
+        session.last_criteria_status = criteria_status
+        self._apply_experiment_updates(session, getattr(verdict, "experiment_updates", []))
         self._record(
             session,
             event_type="director_verdict",
@@ -1353,7 +1404,9 @@ class ResearchOrchestrator:
         )
 
         if verdict.decision == "CONTINUE":
-            if verdict.next_task.strip():
+            if verdict.next_task.strip() == FINAL_REPORT_TASK:
+                session.next_round_task = FINAL_REPORT_TASK
+            elif verdict.next_task.strip():
                 next_round = session.round_id + 1
                 session.next_round_task = (
                     verdict.next_task.strip()
@@ -1407,6 +1460,48 @@ class ResearchOrchestrator:
 
         if session.round_id == round_limit - 1 and session.mode == Mode.RESEARCH:
             session.next_round_task = FINAL_REPORT_TASK
+
+    def _apply_experiment_updates(self, session: ResearchSession, updates) -> None:
+        if not updates:
+            return
+        store = ExperimentStore(self.config.experiments_path(session.session_id))
+        added = 0
+        retired = 0
+        now = utc_timestamp()
+        for update in updates:
+            if update.op == "add":
+                store.append(
+                    ExperimentEntry(
+                        exp_id=store.next_exp_id(),
+                        name=update.name,
+                        hypothesis=update.hypothesis,
+                        status="planned",
+                        round_id=session.round_id,
+                        metrics={},
+                        dir="",
+                        created_at=now,
+                        updated_at=now,
+                        success_metric=update.success_metric,
+                        priority=update.priority,
+                    )
+                )
+                added += 1
+                continue
+            if update.op == "retire":
+                entries = store.read_all()
+                target = next((entry for entry in entries if entry.exp_id == update.exp_id), None)
+                if target is None or target.status != "planned":
+                    continue
+                target.status = "retired"
+                target.updated_at = now
+                store.upsert(target)
+                retired += 1
+        self._record(
+            session,
+            event_type="experiment_backlog_updated",
+            decision=f"add={added}, retire={retired}",
+            confidence="high",
+        )
 
     def _handle_round_output(self, session: ResearchSession, output: RoundOutput, verdict=None) -> str:
         approval_text = "なし"
@@ -1515,6 +1610,36 @@ class ResearchOrchestrator:
             seen.add(entry.exp_id)
         return evidence_ids
 
+    def _generate_initial_experiment_roadmap(self, session: ResearchSession) -> None:
+        if self.roadmap_planner is None:
+            return
+        plan_text = self._render_plan_md(session)
+        items = self.roadmap_planner.generate(session, plan_text)
+        store = ExperimentStore(self.config.experiments_path(session.session_id))
+        now = utc_timestamp()
+        for item in items:
+            store.append(
+                ExperimentEntry(
+                    exp_id=store.next_exp_id(),
+                    name=item.name,
+                    hypothesis=item.hypothesis,
+                    status="planned",
+                    round_id=0,
+                    metrics={},
+                    dir="",
+                    created_at=now,
+                    updated_at=now,
+                    success_metric=item.success_metric,
+                    priority=item.priority,
+                )
+            )
+        self._record(
+            session,
+            event_type="experiment_roadmap_generated",
+            decision=f"{len(items)}件",
+            confidence="mid" if items else "low",
+        )
+
     def _experiment_summary(self, session: ResearchSession) -> str:
         entries = ExperimentStore(self.config.experiments_path(session.session_id)).read_all()
         if not entries:
@@ -1527,6 +1652,42 @@ class ResearchOrchestrator:
                 f"{entry.exp_id} [round={entry.round_id} {entry.status}] "
                 f"{entry.name}: {hypothesis} metrics={metrics}"
             )
+        return "\n".join(lines)
+
+    def _planned_backlog_summary(self, session: ResearchSession, limit: int = 8) -> str:
+        backlog = ExperimentStore(self.config.experiments_path(session.session_id)).planned_backlog()
+        if not backlog:
+            return "なし"
+        lines = []
+        for entry in backlog[:limit]:
+            lines.append(
+                f"- {entry.exp_id} [{entry.priority or '-'}] {entry.name}: "
+                f"{entry.hypothesis[:100]} | success_metric={entry.success_metric or '未設定'}"
+            )
+        remaining = len(backlog) - limit
+        if remaining > 0:
+            lines.append(f"- ...他{remaining}件")
+        return "\n".join(lines)
+
+    def _max_rounds_unmet_criteria_note(self, session: ResearchSession) -> str:
+        if not session.last_criteria_status:
+            return "\n条件充足は未判定です。\n/re start で継続できます。"
+        unmet = [
+            item
+            for item in session.last_criteria_status
+            if item.get("status") != "met"
+        ]
+        if not unmet:
+            return "\n全criteriaは直近判定でmetです。\n/re start で追加検証できます。"
+        lines = ["", "未達criteria:"]
+        for item in unmet:
+            lines.append(
+                f"- {item.get('criterion', '?')}: {item.get('status', 'unknown')} | "
+                f"{item.get('evidence', '') or 'evidenceなし'}"
+            )
+        if session.next_round_task:
+            lines.append(f"次にやるべきこと: {session.next_round_task[:200]}")
+        lines.append("/re start で継続できます。")
         return "\n".join(lines)
 
     def _format_report(
@@ -1684,7 +1845,9 @@ class ResearchOrchestrator:
 ## 実験規約
 - 1実験=1フォルダ experiments/EXP-xxx_<slug>/（config.json, results/, figures/, notes.md）
 - 実験の開始・完了時に experiments.jsonl に1行JSONを追記/更新する
-- experiments.jsonl のフィールド: exp_id, name, hypothesis, status, round_id, metrics, dir, created_at, updated_at
+- experiments.jsonl のplannedバックログ優先度順に実験を消化し、status遷移（planned→running→done）とmetricsを必ず記録する
+- 結果を主張する前に必ず検証し、「検証:」セクションに方法を書く。検証していない事項は「未確認事項」へ
+- experiments.jsonl のフィールド: exp_id, name, hypothesis, status, round_id, metrics, dir, created_at, updated_at, success_metric, priority
 - 論文用の清書図は paper/figures/ へコピーする
 - 長時間ジョブ（クラウドGPU等）は投行→ジョブIDをnotes.mdとexperiments.jsonlに記録→後続ラウンドで結果回収、の非同期パターンを使う
 
@@ -1710,6 +1873,7 @@ class ResearchOrchestrator:
             session.redirects,
             session.constraints,
         )
+        experiment_roadmap = self._render_experiment_roadmap_for_plan(session)
         return f"""# Research Plan
 
 ## Handoff
@@ -1748,9 +1912,28 @@ class ResearchOrchestrator:
 ## Redirects And Constraints
 {redirects_and_constraints}
 
+## Experiment Roadmap
+{experiment_roadmap}
+
 ## Next Step For Researching
 {session.next_action or "未設定"}
 """
+
+    def _render_experiment_roadmap_for_plan(self, session: ResearchSession) -> str:
+        store = ExperimentStore(self.config.experiments_path(session.session_id))
+        backlog = store.planned_backlog()
+        lines: list[str] = []
+        if backlog:
+            for entry in backlog:
+                lines.append(
+                    f"- {entry.exp_id} [{entry.priority or '-'}] {entry.name}: "
+                    f"{entry.hypothesis} → 成功指標: {entry.success_metric or '未設定'}"
+                )
+        else:
+            lines.append("- なし")
+        if any(entry.status in {"done", "retired"} for entry in store.read_all()):
+            lines.append("- (実行済み・撤回は experiments.jsonl 参照)")
+        return "\n".join(lines)
 
     def _build_paper_provider(self, provider_name: str) -> PaperSearchProvider:
         if provider_name == "arxiv":

@@ -44,6 +44,7 @@ class HarnessConfig:
     claude_agent_command: str | None = None
     plan_agent_model: str = "5.4mini"
     director_model: str = ""
+    roadmap_model: str = ""
     research_agent_model: str = "gpt-5.5"
     max_rounds: int = 3
     fresh_interval: int = 2
@@ -54,6 +55,7 @@ class HarnessConfig:
     max_api_calls: int = 0
     max_total_tokens: int = 0
     max_agent_calls: int = 0
+    max_round_retries: int = 1
     max_command_seconds: int = 300
     research_network_access: bool = False
     paper_provider: str = "fake"
@@ -96,6 +98,7 @@ class HarnessConfig:
             claude_agent_command=os.getenv("CLAUDE_AGENT_COMMAND") or None,
             plan_agent_model=os.getenv("PLAN_AGENT_MODEL", "5.4mini"),
             director_model=os.getenv("DIRECTOR_MODEL", ""),
+            roadmap_model=os.getenv("ROADMAP_MODEL", ""),
             research_agent_model=os.getenv("RESEARCH_AGENT_MODEL", "gpt-5.5"),
             max_rounds=_int_env("MAX_ROUNDS", 3),
             fresh_interval=_int_env("FRESH_INTERVAL", 2),
@@ -106,6 +109,7 @@ class HarnessConfig:
             max_api_calls=_int_env("MAX_API_CALLS", 0),
             max_total_tokens=_int_env("MAX_TOTAL_TOKENS", 0),
             max_agent_calls=_int_env("MAX_AGENT_CALLS", 0),
+            max_round_retries=_int_env("MAX_ROUND_RETRIES", 1),
             max_command_seconds=_int_env("MAX_COMMAND_SECONDS", 300),
             research_network_access=_bool_env("RESEARCH_NETWORK_ACCESS", False),
             paper_provider=os.getenv("PAPER_PROVIDER", "fake"),

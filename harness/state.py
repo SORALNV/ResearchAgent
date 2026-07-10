@@ -90,6 +90,7 @@ class ResearchSession:
     completed_reason: str | None = None
     memory_saved: bool = False
     next_round_task: str = ""
+    last_criteria_status: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def new(cls, goal: str, project_name: str = "Research Harness MVP") -> "ResearchSession":
@@ -171,6 +172,7 @@ class ResearchSession:
             completed_reason=data.get("completed_reason"),
             memory_saved=bool(data.get("memory_saved", False)),
             next_round_task=data.get("next_round_task", ""),
+            last_criteria_status=list(data.get("last_criteria_status", [])),
         )
 
 

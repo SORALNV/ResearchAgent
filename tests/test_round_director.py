@@ -8,7 +8,7 @@ from harness.experiments import ExperimentEntry, ExperimentStore
 from harness.ledger import ResearchLedger
 from harness.modes import Mode
 from harness.orchestrator import ResearchOrchestrator
-from harness.round_director import CriterionStatus, DirectorVerdict, parse_director_output
+from harness.round_director import CriterionStatus, DirectorVerdict, ExperimentUpdate, parse_director_output
 from harness.state import ResearchSession, utc_timestamp
 
 
@@ -120,6 +120,30 @@ def test_parse_director_output_invalid_decision_falls_back():
     assert "invalid or missing decision" in verdict.reason
 
 
+def test_parse_director_output_experiment_updates():
+    text = """CRITERIA_STATUS:
+- C1: partial | EXP-001不足
+CRITIQUE: 追加検証が必要
+DECISION: CONTINUE
+NEXT_TASK: 次を実行
+REASON: まだ不足
+EXPERIMENTS_UPDATE:
+- add: natural-video-check | 自然動画で改善する | accuracy >= 0.8 | high
+- retire: EXP-002 | 前提が崩れた
+"""
+
+    verdict = parse_director_output(text)
+
+    assert len(verdict.experiment_updates) == 2
+    assert verdict.experiment_updates[0].op == "add"
+    assert verdict.experiment_updates[0].priority == "high"
+    assert verdict.experiment_updates[1].op == "retire"
+    assert verdict.experiment_updates[1].exp_id == "EXP-002"
+    assert parse_director_output(
+        "CRITERIA_STATUS:\n- C1: partial | x\nDECISION: CONTINUE\n"
+    ).experiment_updates == []
+
+
 def test_continue_next_task_is_used_by_next_round(tmp_path):
     config = _config(tmp_path, max_rounds=3)
     runner = RecordingRunner(config)
@@ -177,7 +201,17 @@ def test_done_without_report_becomes_final_report_task(tmp_path):
     config = _config(tmp_path, max_rounds=1)
     runner = RecordingRunner(config)
     orchestrator = ResearchOrchestrator(config, discord=FakeDiscordAdapter(), runner=runner)
-    orchestrator.round_director = SequenceDirector([_verdict("DONE")])
+    orchestrator.round_director = SequenceDirector(
+        [
+            _verdict(
+                "DONE",
+                criteria=[
+                    CriterionStatus("C1", "met", "EXP-001で確認"),
+                    CriterionStatus("C2", "met", "round1_notes.mdに実測値"),
+                ],
+            )
+        ]
+    )
     session = _research_session(config, round_budget=1)
     orchestrator.store.save(session)
 
@@ -185,6 +219,131 @@ def test_done_without_report_becomes_final_report_task(tmp_path):
     saved = orchestrator.store.load()
 
     assert saved.next_round_task == FINAL_REPORT_TASK
+
+
+def test_evidence_gate_downgrades_met_without_evidence(tmp_path):
+    config = _config(tmp_path)
+    orchestrator = ResearchOrchestrator(config, discord=FakeDiscordAdapter(), runner=RecordingRunner(config))
+    session = _research_session(config, round_budget=3)
+    session.round_id = 1
+
+    orchestrator._apply_director_verdict(
+        session,
+        _verdict("CONTINUE", criteria=[CriterionStatus("C1", "met", "")]),
+        round_limit=3,
+    )
+
+    assert session.last_criteria_status[0]["status"] == "partial"
+    events = orchestrator._journal(session).read_entries()
+    assert any(event.get("event_type") == "evidence_gate_downgraded" for event in events)
+
+
+def test_done_gate_rejects_unmet_criteria(tmp_path):
+    config = _config(tmp_path)
+    orchestrator = ResearchOrchestrator(config, discord=FakeDiscordAdapter(), runner=RecordingRunner(config))
+    session = _research_session(config, round_budget=3)
+    session.round_id = 1
+
+    orchestrator._apply_director_verdict(
+        session,
+        _verdict("DONE", criteria=[CriterionStatus("C1", "partial", "まだ不足")]),
+        round_limit=3,
+    )
+
+    assert session.mode == Mode.RESEARCH
+    assert session.next_round_task
+    assert session.next_round_task != FINAL_REPORT_TASK
+    assert "未達のゴール条件（C1）" in session.next_round_task
+    events = orchestrator._journal(session).read_entries()
+    assert any(event.get("event_type") == "done_gate_rejected" for event in events)
+
+
+def test_director_backlog_updates_add_and_retire_planned_only(tmp_path):
+    config = _config(tmp_path)
+    orchestrator = ResearchOrchestrator(config, discord=FakeDiscordAdapter(), runner=RecordingRunner(config))
+    session = _research_session(config, round_budget=3)
+    store = ExperimentStore(config.experiments_path(session.session_id))
+    now = utc_timestamp()
+    store.append(
+        ExperimentEntry(
+            exp_id="EXP-001",
+            name="planned",
+            hypothesis="planned h",
+            status="planned",
+            round_id=0,
+            metrics={},
+            dir="",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.append(
+        ExperimentEntry(
+            exp_id="EXP-002",
+            name="done",
+            hypothesis="done h",
+            status="done",
+            round_id=0,
+            metrics={},
+            dir="",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    orchestrator._apply_director_verdict(
+        session,
+        DirectorVerdict(
+            decision="CONTINUE",
+            criteria_status=[CriterionStatus("C1", "partial", "x")],
+            critique="",
+            next_task="",
+            reason="",
+            raw="raw",
+            source="llm",
+            experiment_updates=[
+                ExperimentUpdate(
+                    op="add",
+                    name="new",
+                    hypothesis="new h",
+                    success_metric="n >= 1",
+                    priority="mid",
+                ),
+                ExperimentUpdate(op="retire", exp_id="EXP-001", reason="obsolete"),
+                ExperimentUpdate(op="retire", exp_id="EXP-002", reason="done untouched"),
+            ],
+        ),
+        round_limit=3,
+    )
+
+    entries = {entry.exp_id: entry for entry in store.read_all()}
+    assert entries["EXP-001"].status == "retired"
+    assert entries["EXP-002"].status == "done"
+    assert entries["EXP-003"].status == "planned"
+    assert entries["EXP-003"].success_metric == "n >= 1"
+
+
+def test_max_rounds_report_mentions_unmet_criteria_and_restart(tmp_path):
+    config = _config(tmp_path, max_rounds=1)
+    runner = RecordingRunner(config)
+    discord = FakeDiscordAdapter()
+    orchestrator = ResearchOrchestrator(config, discord=discord, runner=runner)
+    orchestrator.round_director = SequenceDirector(
+        [
+            _verdict(
+                "CONTINUE",
+                next_task="追加実験をする",
+                criteria=[CriterionStatus("C1", "partial", "EXP-001が不足")],
+            )
+        ]
+    )
+    session = _research_session(config, round_budget=1)
+    orchestrator.store.save(session)
+
+    orchestrator._run_until_blocked_or_done(session)
+
+    assert any("未達criteria" in message for message in discord.important_messages)
+    assert any("/re start で継続できます" in message for message in discord.important_messages)
 
 
 def test_blocked_verdict_pauses_session(tmp_path):

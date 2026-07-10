@@ -17,6 +17,8 @@ class ExperimentEntry:
     dir: str
     created_at: str
     updated_at: str
+    success_metric: str = ""
+    priority: str = ""
 
 
 class ExperimentStore:
@@ -70,3 +72,13 @@ class ExperimentStore:
                 continue
             max_seen = max(max_seen, int(match.group(1)))
         return f"EXP-{max_seen + 1:03d}"
+
+    def planned_backlog(self) -> list[ExperimentEntry]:
+        priority_order = {"high": 0, "mid": 1, "low": 2, "": 3}
+        return sorted(
+            [entry for entry in self.read_all() if entry.status == "planned"],
+            key=lambda entry: (
+                priority_order.get(entry.priority, priority_order[""]),
+                entry.exp_id,
+            ),
+        )

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from dataclasses import asdict
+from pathlib import Path
 
 from harness.agent_runner import FINAL_REPORT_TASK, MockAgentRunner, RoundOutput
 from harness.approval import ApprovalGate, render_approval_request
@@ -27,6 +30,7 @@ from harness.planning import (
     render_redirects_and_constraints_for_plan,
 )
 from harness.reporting import render_report, render_run_summary, review_report
+from harness.project_catalog import ProjectCatalog, VersionInfo
 from harness.report_review import ReportReviewer, ReviewResult
 from harness.research_brief import ResearchBriefWriter, render_research_brief
 from harness.roadmap import ExperimentRoadmapPlanner
@@ -62,6 +66,7 @@ class ResearchOrchestrator:
         handlers = {
             "goal": lambda: self.goal(str(command.args["text"])),
             "new_session": self.new_session,
+            "fork": lambda: self.fork_session(str(command.args.get("version", ""))),
             "enter_plan": self.enter_plan,
             "plan_text": lambda: self.plan_text(
                 str(command.args["text"]),
@@ -257,7 +262,75 @@ class ResearchOrchestrator:
         if previous_summary:
             message = "## 前テーマの終了処理\n" + previous_summary + "\n\n" + message
         self.discord.send(message, channel="important")
+        self._refresh_catalog_index()
         return message
+
+    def fork_session(self, version: str = "") -> str:
+        parent_info = self._resolve_fork_parent(version)
+        if parent_info is None:
+            if version:
+                label = self._normalize_requested_version(version) or version.upper()
+                return f"{label} が見つかりません。/re runs で確認してください"
+            return "継承元がありません。/re fork Vxxx で指定してください"
+        previous = self.store.load()
+        previous_summary = ""
+        if previous and previous.mode != Mode.DONE:
+            previous_summary = self.stop(quiet=True)
+        parent_path = Path(parent_info.path)
+        state_path = parent_path / "state.json"
+        try:
+            parent = ResearchSession.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+        except Exception:
+            return f"{parent_info.version_label} の state.json を読めません。/re runs で確認してください"
+        parent_version_label = parent.version_label or parent_info.version_label
+        parent.version_label = parent_version_label
+        session = ResearchSession.new(parent.research_goal, project_name=parent.project_name)
+        session.goal_criteria = list(parent.goal_criteria)
+        session.research_methods = list(parent.research_methods)
+        session.constraints = list(parent.constraints)
+        session.open_questions = list(parent.open_questions)
+        session.lessons = list(parent.lessons)
+        session.parent_version = parent_version_label
+        session.parent_session_id = parent.session_id
+        session.phase = "plan"
+        session.next_action = "壁打ちで方針を調整し、固まったら /re start"
+        slug = self._slug_from_research_path(parent_path, parent)
+        version_label, research_dir = self.config.allocate_child_research_dir(
+            parent_version_label,
+            session.session_id,
+            slug,
+        )
+        session.version_label = version_label
+        session.research_dir = str(research_dir)
+        self._copy_if_exists(parent_path / "papers.jsonl", research_dir / "papers.jsonl")
+        planned_count = self._copy_planned_experiments(parent_path, research_dir)
+        self.store.save(session)
+        plan_path = self._write_plan_md(session)
+        self._append_inheritance_plan_section(plan_path, parent, parent_path)
+        brief = self._brief_writer(session).write(session)
+        summary = (
+            f"継承セッションを作成しました: {session.version_label} ← {parent_version_label}\n"
+            f"親: {parent.project_name or parent.research_goal}\n"
+            f"継承: criteria {len(session.goal_criteria)}件 / planned実験 {planned_count}件 / 教訓 {len(session.lessons)}件\n"
+            "次: 壁打ちで方針を調整し、固まったら /re start"
+        )
+        if previous_summary:
+            summary = "## 前テーマの終了処理\n" + previous_summary + "\n\n" + summary
+        self._record(
+            session,
+            event_type="session_forked",
+            parent_version=parent_version_label,
+            parent_session_id=parent.session_id,
+            inherited_criteria=len(session.goal_criteria),
+            inherited_planned_experiments=planned_count,
+            inherited_lessons=len(session.lessons),
+            research_brief_snapshot=brief,
+            files_changed=[str(plan_path), str(research_dir / "papers.jsonl"), str(research_dir / "experiments.jsonl")],
+        )
+        self.store.save(session)
+        self.discord.send(summary, channel="important")
+        self._refresh_catalog_index()
+        return summary
 
     def enter_plan(self) -> str:
         session = self.store.load()
@@ -634,11 +707,13 @@ class ResearchOrchestrator:
         )
         papers = self._paper_store(session).read_all()
         ledger_entries = self._research_ledger(session).read_entries()
+        experiment_entries = ExperimentStore(self.config.experiments_path(session.session_id)).read_all()
         generated_report = render_report(
             session,
             papers,
             ledger_entries,
             model_or_command=self.config.sub_agent_command or "mock",
+            experiments=experiment_entries,
         )
         report_path = self.config.report_path(session.session_id)
         harness_report_path = report_path.parent / "harness_report.md"
@@ -661,7 +736,7 @@ class ResearchOrchestrator:
             report_path.write_text(generated_report + "\n", encoding="utf-8")
             report_files_changed = [str(report_path)]
         report_review = review_report(final_report, papers, session, report_path=report_path)
-        run_summary = render_run_summary(session, papers, ledger_entries)
+        run_summary = render_run_summary(session, papers, ledger_entries, experiments=experiment_entries)
         self.config.run_summary_path(session.session_id).write_text(run_summary + "\n", encoding="utf-8")
         report_files_changed.append(str(self.config.run_summary_path(session.session_id)))
         if not quiet:
@@ -726,6 +801,7 @@ class ResearchOrchestrator:
                 str(self.config.run_summary_path(session.session_id)),
             ],
         )
+        self._refresh_catalog_index()
         return report
 
     def remember(self, text: str) -> str:
@@ -1084,24 +1160,133 @@ class ResearchOrchestrator:
         return report
 
     def runs(self) -> str:
-        rows = self._list_runs()
-        if not rows:
+        infos = self._list_runs()
+        if not infos:
             return f"研究フォルダはまだありません: {self.config.research_archive_path}"
         lines = ["Research runs:"]
-        for row in rows:
-            lines.append(
-                f"- {row['version']} {row['session_id']} mode={row['mode']} "
-                f"round={row['round_id']} goal={row['goal']} path={row['path']}"
+        for major in sorted({info.major for info in infos}, reverse=True):
+            group = sorted(
+                [info for info in infos if info.major == major],
+                key=lambda info: info.minor,
             )
+            head = group[0]
+            if head.project_name and head.project_name != "Research Harness MVP":
+                title = head.project_name
+            else:
+                title = head.goal or head.project_name or "untitled-research"
+            lines.append(f"[V{major:03d}] {title}")
+            for info in group:
+                indent = "  - " if info.minor > 0 else "- "
+                parent = f" ← {info.parent_version}" if info.parent_version else ""
+                reason = f" {info.completed_reason}" if info.completed_reason else ""
+                lines.append(
+                    f"{indent}{info.version_label} {info.session_id} {info.mode} "
+                    f"round={info.round_id} met={info.met}/{info.total}{reason}{parent}"
+                )
         session = self.store.load()
         if session:
             self._record(
                 session,
                 event_type="runs_list_requested",
-                main_agent_summary=f"{len(rows)}件の研究フォルダを表示",
+                main_agent_summary=f"{len(infos)}件の研究フォルダを表示",
                 confidence="high",
             )
         return "\n".join(lines)
+
+    def _resolve_fork_parent(self, version: str) -> VersionInfo | None:
+        infos = self._list_runs()
+        if not version:
+            done = [info for info in infos if info.mode == "done"]
+            return max(done, key=lambda info: (info.major, info.minor), default=None)
+        match = re.fullmatch(r"V?(\d{1,3})(?:\.(\d+))?", version.strip(), re.IGNORECASE)
+        if not match:
+            return None
+        major = int(match.group(1))
+        if match.group(2) is not None:
+            minor = int(match.group(2))
+            return next(
+                (info for info in infos if info.major == major and info.minor == minor),
+                None,
+            )
+        candidates = [info for info in infos if info.major == major]
+        return max(candidates, key=lambda info: info.minor, default=None)
+
+    def _normalize_requested_version(self, version: str) -> str:
+        match = re.fullmatch(r"V?(\d{1,3})(?:\.(\d+))?", version.strip(), re.IGNORECASE)
+        if not match:
+            return ""
+        label = f"V{int(match.group(1)):03d}"
+        if match.group(2) is not None:
+            label += f".{int(match.group(2))}"
+        return label
+
+    def _slug_from_research_path(self, path: Path, session: ResearchSession) -> str:
+        parts = path.name.split("_", 2)
+        if len(parts) == 3 and parts[2]:
+            return parts[2]
+        from harness.config import _slugify
+
+        return _slugify(session.project_name or session.research_goal)
+
+    def _copy_if_exists(self, source: Path, target: Path) -> None:
+        if not source.exists():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    def _copy_planned_experiments(self, parent_path: Path, research_dir: Path) -> int:
+        parent_store = ExperimentStore(parent_path / "experiments.jsonl")
+        child_store = ExperimentStore(research_dir / "experiments.jsonl")
+        count = 0
+        for entry in parent_store.read_all():
+            if entry.status != "planned":
+                continue
+            entry.round_id = 0
+            child_store.append(entry)
+            count += 1
+        return count
+
+    def _append_inheritance_plan_section(
+        self,
+        plan_path: Path,
+        parent: ResearchSession,
+        parent_path: Path,
+    ) -> None:
+        criteria = parent.last_criteria_status or []
+        criteria_lines = [
+            f"- {item.get('criterion', '?')}: {item.get('status', 'unknown')} | {item.get('evidence', '')}"
+            for item in criteria
+        ] or ["- 未評価"]
+        experiments = [
+            entry
+            for entry in ExperimentStore(parent_path / "experiments.jsonl").read_all()
+            if entry.status in {"done", "failed"}
+        ][:5]
+        experiment_lines = [
+            f"- {entry.exp_id} [{entry.status}] {entry.name}: {entry.metrics}"
+            for entry in experiments
+        ] or ["- なし"]
+        lesson_lines = [f"- {lesson}" for lesson in parent.lessons] or ["- なし"]
+        section = "\n".join(
+            [
+                "",
+                f"## 継承元（{parent.version_label or '未設定'}）",
+                "",
+                f"- 完了理由: {parent.completed_reason or 'なし'}",
+                "",
+                "### 最終criteria状況",
+                *criteria_lines,
+                "",
+                "### 実行済み実験サマリ",
+                *experiment_lines,
+                "",
+                "### 教訓",
+                *lesson_lines,
+                "",
+            ]
+        )
+        with plan_path.open("a", encoding="utf-8") as handle:
+            handle.write(section)
 
     def list_experiments(self) -> str:
         from harness.experiments import ExperimentStore
@@ -1794,9 +1979,18 @@ class ResearchOrchestrator:
     def _generate_initial_experiment_roadmap(self, session: ResearchSession) -> None:
         if self.roadmap_planner is None:
             return
+        store = ExperimentStore(self.config.experiments_path(session.session_id))
+        backlog = store.planned_backlog()
+        if backlog:
+            self._record(
+                session,
+                event_type="experiment_roadmap_skipped",
+                decision=f"planned_backlog={len(backlog)}",
+                confidence="high",
+            )
+            return
         plan_text = self._render_plan_md(session)
         items = self.roadmap_planner.generate(session, plan_text)
-        store = ExperimentStore(self.config.experiments_path(session.session_id))
         now = utc_timestamp()
         for item in items:
             store.append(
@@ -2122,51 +2316,14 @@ class ResearchOrchestrator:
             return ArxivPaperSearchProvider()
         return FakePaperSearchProvider()
 
-    def _list_runs(self) -> list[dict[str, object]]:
-        if not self.config.research_archive_path.exists():
-            return []
-        rows = []
-        for path in sorted(self.config.research_archive_path.iterdir(), reverse=True):
-            if not path.is_dir() or not path.name.startswith("V"):
-                continue
-            state_path = path / "state.json"
-            if not state_path.exists():
-                rows.append(
-                    {
-                        "version": path.name.split("_", 1)[0],
-                        "session_id": "unknown",
-                        "mode": "unknown",
-                        "round_id": "?",
-                        "goal": "state.jsonなし",
-                        "path": path,
-                    }
-                )
-                continue
-            try:
-                session = ResearchSession.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
-            except Exception:
-                rows.append(
-                    {
-                        "version": path.name.split("_", 1)[0],
-                        "session_id": "unknown",
-                        "mode": "broken",
-                        "round_id": "?",
-                        "goal": "state.json読込失敗",
-                        "path": path,
-                    }
-                )
-                continue
-            rows.append(
-                {
-                    "version": session.version_label or path.name.split("_", 1)[0],
-                    "session_id": session.session_id,
-                    "mode": session.mode.value,
-                    "round_id": session.round_id,
-                    "goal": session.research_goal,
-                    "path": path,
-                }
-            )
-        return rows
+    def _list_runs(self) -> list[VersionInfo]:
+        return ProjectCatalog(self.config.research_archive_path).scan()
+
+    def _refresh_catalog_index(self) -> None:
+        try:
+            ProjectCatalog(self.config.research_archive_path).write_index()
+        except OSError:
+            return
 
     def _citation_note(self, papers: list[Paper]) -> str:
         if not papers:
@@ -2373,6 +2530,7 @@ class ResearchOrchestrator:
             return
         current.rename(target)
         session.research_dir = str(target)
+        self._refresh_catalog_index()
 
 
 def _format_paper_line(paper: Paper) -> str:

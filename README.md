@@ -177,6 +177,7 @@ Supported slash commands:
 - `/re cost`
 - `/re doctor`
 - `/re runs`
+- `/re fork [Vxxx[.minor]]`
 - `/re accept <phase_gate_id>`
 - `/re revise <phase_gate_id> <reason>`
 - `/re approve <approval_id>`
@@ -419,6 +420,20 @@ The file summarizes the research goal, criteria, methods, open questions, file l
 Do not overwrite an active session with `/re new`. The harness refuses to do so unless the existing session is stopped first. Keep old folders for audit and comparison; start a new research folder for each new topic or major run.
 
 Use `/re runs` to list archived research folders.
+
+## Projects and Versions
+
+Research folders use `research_runs/V{major}.{minor}_{session_id}_{slug}/`.
+
+The major version is the project or research theme. A new topic created with `/re new` gets the next major version and starts at `.0`. The minor version is a continuation of the same project. Use `/re fork` to create the next minor version from a completed parent run:
+
+- `/re fork` continues from the latest completed run.
+- `/re fork V009` continues from the highest minor version under `V009`.
+- `/re fork V009.0` continues from that exact version.
+
+Forking carries forward the research goal, project name, goal criteria, research methods, constraints, open questions, lessons, `papers.jsonl`, and only the planned experiment backlog from `experiments.jsonl`. It records `parent_version` and `parent_session_id`, regenerates `plan.md`, and appends a parent summary with completion reason, final criteria status, recent executed experiments, and lessons.
+
+`research_runs/INDEX.md` is regenerated after new sessions, forks, stops, and successful untitled-folder renames. It groups versions by project major version and shows mode, round, criteria met count, completion reason, and parent lineage.
 
 ## Agent Memory
 

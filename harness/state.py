@@ -63,6 +63,8 @@ class ResearchSession:
     updated_at: str
     version_label: str = ""
     research_dir: str = ""
+    parent_version: str = ""
+    parent_session_id: str = ""
     round_id: int = 0
     round_budget: int = 0
     current_question: str = ""
@@ -151,6 +153,8 @@ class ResearchSession:
             updated_at=data["updated_at"],
             version_label=data.get("version_label", ""),
             research_dir=data.get("research_dir", ""),
+            parent_version=data.get("parent_version", ""),
+            parent_session_id=data.get("parent_session_id", ""),
             round_id=data.get("round_id", 0),
             round_budget=data.get("round_budget", 0),
             current_question=data.get("current_question", ""),

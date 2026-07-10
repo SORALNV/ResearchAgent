@@ -14,6 +14,7 @@ def render_report(
     papers: list[Paper],
     ledger_entries: list[LedgerEntry],
     model_or_command: str,
+    experiments: list | None = None,
 ) -> str:
     paper_lines = [
         f"- [{paper.paper_id}] {paper.title} ({paper.year or '未確認'}, {paper.source})"
@@ -23,8 +24,10 @@ def render_report(
         f"- {entry.node_id}: {entry.hypothesis} -> {entry.next_action}"
         for entry in ledger_entries
     ] or ["- 未実行"]
+    experiment_lines = _experiment_lines(experiments) if experiments else ledger_lines
     scout = session.planning_scout or {}
     unverified = _unverified_claims(session, papers)
+    met, total = _criteria_counts(session)
     provenance = {
         "generated_at": utc_timestamp(),
         "generator_role": "deterministic_report_writer",
@@ -42,7 +45,17 @@ def render_report(
             f"- Goal: {session.research_goal}",
             f"- Mode: {session.mode.value}",
             f"- Rounds: {session.round_id}",
+            f"- Criteria Met: {met}/{total}",
             f"- Novelty Status: {scout.get('novelty_status') or '未評価'}",
+            "",
+            "## Version",
+            f"- Project: {session.project_name or '未設定'}",
+            f"- Version: {session.version_label or '未設定'}",
+            f"- Parent: {session.parent_version or 'なし'}",
+            f"- Session: {session.session_id}",
+            "",
+            "## Goal Criteria",
+            *_criteria_lines(session),
             "",
             "## Sources",
             *paper_lines,
@@ -56,8 +69,8 @@ def render_report(
             "## Unverified Claims",
             *unverified,
             "",
-            "## Experiments or Analysis",
-            *ledger_lines,
+            "## Experiments",
+            *experiment_lines,
             "",
             "## Risks",
             *_risks(session),
@@ -65,28 +78,103 @@ def render_report(
             "## Next Steps",
             f"- {session.next_action or '未設定'}",
             "",
+            "## Lessons Learned",
+            *([f"- {lesson}" for lesson in session.lessons] or ["- なし"]),
+            "",
+            "## Report Review",
+            *_review_lines(session),
+            "",
             "## AI Provenance",
             *[f"- {key}: {value}" for key, value in provenance.items()],
         ]
     )
 
 
-def render_run_summary(session: ResearchSession, papers: list[Paper], ledger_entries: list[LedgerEntry]) -> str:
+def render_run_summary(
+    session: ResearchSession,
+    papers: list[Paper],
+    ledger_entries: list[LedgerEntry],
+    experiments: list | None = None,
+) -> str:
     paper_ids = ", ".join(paper.paper_id for paper in papers[:5]) or "なし"
     latest = ledger_entries[-1].next_action if ledger_entries else session.next_action or "未設定"
+    met, total = _criteria_counts(session)
+    review = session.last_report_review or {}
+    review_text = (
+        f"{review.get('verdict', '未実施')} score={review.get('score', 0)}"
+        if review
+        else "未実施"
+    )
+    experiments = experiments or []
+    done_count = sum(1 for entry in experiments if getattr(entry, "status", "") == "done")
+    planned_count = sum(1 for entry in experiments if getattr(entry, "status", "") == "planned")
     return "\n".join(
         [
             "# Run Summary",
             "",
             f"- Session: {session.session_id}",
             f"- Version: {session.version_label or '未設定'}",
+            f"- Project: {session.project_name or '未設定'}",
+            f"- Parent: {session.parent_version or 'なし'}",
             f"- Goal: {session.research_goal}",
             f"- Rounds: {session.round_id}",
+            f"- Criteria Met: {met}/{total}",
+            f"- Completed Reason: {session.completed_reason or 'なし'}",
+            f"- Review: {review_text}",
+            f"- Lessons: {len(session.lessons)}",
+            f"- Experiments: done {done_count} / planned {planned_count}",
             f"- Papers: {paper_ids}",
             f"- Novelty Status: {session.planning_scout.get('novelty_status') or '未評価'}",
             f"- Next: {latest}",
         ]
     )
+
+
+def _criteria_counts(session: ResearchSession) -> tuple[int, int]:
+    statuses = session.last_criteria_status or []
+    return (
+        sum(1 for item in statuses if str(item.get("status", "")).lower() == "met"),
+        len(statuses),
+    )
+
+
+def _criteria_lines(session: ResearchSession) -> list[str]:
+    if not session.last_criteria_status:
+        return ["- 未評価"]
+    return [
+        f"- {item.get('criterion', '?')}: {item.get('status', 'unknown')} | {item.get('evidence', '')}"
+        for item in session.last_criteria_status
+    ]
+
+
+def _experiment_lines(experiments: list | None) -> list[str]:
+    if not experiments:
+        return ["- 未実行"]
+    return [
+        "- {exp_id} [{status}] {name} | metrics={metrics}".format(
+            exp_id=getattr(entry, "exp_id", ""),
+            status=getattr(entry, "status", ""),
+            name=getattr(entry, "name", ""),
+            metrics=getattr(entry, "metrics", {}),
+        )
+        for entry in experiments
+    ]
+
+
+def _review_lines(session: ResearchSession) -> list[str]:
+    review = session.last_report_review or {}
+    if not review:
+        return ["- 未実施"]
+    lines = [
+        f"- Verdict: {review.get('verdict', '未実施')}",
+        f"- Score: {review.get('score', 0)}",
+    ]
+    issues = review.get("major_issues") or []
+    if issues:
+        lines.append("- Major Issues: " + "; ".join(str(item) for item in issues))
+    else:
+        lines.append("- Major Issues: なし")
+    return lines
 
 
 def review_report(

@@ -11,7 +11,7 @@ ALIASES = {}
 def parse_research_command(text: str) -> Command:
     parts = shlex.split(text)
     if len(parts) < 2 or parts[0] != "/re":
-        raise ValueError("expected /re <new|plan|start|status|pause|resume|redirect|idea|remember|search|papers|paper|exps|task|eval|cost|doctor|runs|accept|revise|approve|reject|stop>")
+        raise ValueError("expected /re <new|fork|plan|start|status|pause|resume|redirect|idea|remember|search|papers|paper|exps|task|eval|cost|doctor|runs|accept|revise|approve|reject|stop>")
     prefix = parts[0]
     action = parts[1]
     if action == "new":
@@ -22,6 +22,11 @@ def parse_research_command(text: str) -> Command:
         if len(parts) != 2:
             raise ValueError("/re plan does not accept text. Send a normal message after switching modes.")
         return Command("enter_plan")
+    if action == "fork":
+        rest = parts[2:]
+        if len(rest) > 1:
+            raise ValueError("/re fork accepts at most one version")
+        return Command("fork", {"version": rest[0] if rest else ""})
     name = ALIASES.get(action, action)
     rest = parts[2:]
     if action in {"new", "redirect", "idea", "remember", "search", "task"}:

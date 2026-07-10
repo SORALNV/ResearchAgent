@@ -308,6 +308,10 @@ class DiscordBotAdapter:
         async def re_runs(interaction: discord.Interaction) -> None:
             await _handle_command(interaction, Command("runs"))
 
+        @re.command(name="fork", description="完了済み研究runから続きバージョンを作成します。")
+        async def re_fork(interaction: discord.Interaction, version: str = "") -> None:
+            await _handle_command(interaction, Command("fork", {"version": version}))
+
         @re.command(name="eval", description="黄金データセットで簡易評価を実行します。")
         async def re_eval(interaction: discord.Interaction) -> None:
             await _handle_command(interaction, Command("eval"))

@@ -155,7 +155,7 @@ class HarnessConfig:
     def allocate_research_dir(self, session_id: str, goal: str) -> tuple[str, Path]:
         self.research_archive_path.mkdir(parents=True, exist_ok=True)
         next_major = 1
-        pattern = re.compile(r"^V(\d{3})\.0")
+        pattern = re.compile(r"^V(\d{3})\.(\d+)")
         for child in self.research_archive_path.iterdir():
             if not child.is_dir():
                 continue
@@ -165,6 +165,35 @@ class HarnessConfig:
         version_label = f"V{next_major:03d}.0"
         slug = _slugify(goal)
         folder = self.research_archive_path / f"{version_label}_{session_id}_{slug}"
+        folder.mkdir(parents=True, exist_ok=False)
+        (folder / "artifacts").mkdir()
+        (folder / "experiments").mkdir()
+        (folder / "paper" / "figures").mkdir(parents=True)
+        return version_label, folder
+
+    def allocate_child_research_dir(
+        self,
+        parent_version_label: str,
+        session_id: str,
+        slug: str,
+    ) -> tuple[str, Path]:
+        match = re.match(r"^V?(\d{1,3})(?:\.(\d+))?$", parent_version_label, re.IGNORECASE)
+        if not match:
+            raise ValueError(f"invalid parent version label: {parent_version_label}")
+        major = int(match.group(1))
+        self.research_archive_path.mkdir(parents=True, exist_ok=True)
+        max_minor = -1
+        pattern = re.compile(rf"^V{major:03d}\.(\d+)", re.IGNORECASE)
+        for child in self.research_archive_path.iterdir():
+            if not child.is_dir():
+                continue
+            child_match = pattern.match(child.name)
+            if child_match:
+                max_minor = max(max_minor, int(child_match.group(1)))
+        minor = max_minor + 1
+        version_label = f"V{major:03d}.{minor}"
+        clean_slug = _slugify(slug)
+        folder = self.research_archive_path / f"{version_label}_{session_id}_{clean_slug}"
         folder.mkdir(parents=True, exist_ok=False)
         (folder / "artifacts").mkdir()
         (folder / "experiments").mkdir()

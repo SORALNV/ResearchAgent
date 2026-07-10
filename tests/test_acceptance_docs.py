@@ -60,6 +60,7 @@ def test_readme_documents_setup_commands_and_flow():
         "/re cost",
         "/re doctor",
         "/re runs",
+        "/re fork",
         "papers.jsonl",
         "golden_questions.jsonl",
         "DISCORD_IMPORTANT_CHANNEL_ID",

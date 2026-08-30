@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 
 from harness.commands import Command, CommandContext
 from harness.discord_adapter import DiscordChannelAdapter, _chunks, bot_display_mode
@@ -9,7 +8,7 @@ from harness.worker import AsyncCommandWorker, WorkerQueueFullError
 
 
 class WorkerDiscordBotAdapter:
-    """discord.py adapter that runs the synchronous orchestrator through AsyncCommandWorker."""
+    """discord.py adapter with an off-loop worker and an immediate cancellation control lane."""
 
     def __init__(
         self,
@@ -18,16 +17,14 @@ class WorkerDiscordBotAdapter:
         channel_id: str | None = None,
         important_channel_id: str | None = None,
         log_channel_id: str | None = None,
+        worker_queue_size: int = 32,
     ) -> None:
         self.orchestrator_factory = orchestrator_factory
         self.token = token
         self.channel_id = int(channel_id) if channel_id else None
         self.important_channel_id = important_channel_id or channel_id
         self.log_channel_id = log_channel_id
-        try:
-            self.worker_queue_size = max(1, int(os.getenv("DISCORD_WORKER_QUEUE_SIZE", "32")))
-        except ValueError:
-            self.worker_queue_size = 32
+        self.worker_queue_size = max(1, int(worker_queue_size))
 
     def run(self) -> None:
         try:
@@ -39,9 +36,14 @@ class WorkerDiscordBotAdapter:
         intents = discord.Intents.default()
         intents.message_content = True
         worker_box: dict[str, AsyncCommandWorker] = {}
+        orchestrator_box: dict[str, object] = {}
 
         class Client(discord.Client):
             async def close(client_self) -> None:
+                orchestrator = orchestrator_box.get("orchestrator")
+                cancel = getattr(orchestrator, "cancel_active", None)
+                if callable(cancel):
+                    await asyncio.to_thread(cancel, "Discord client shutdown")
                 worker = worker_box.get("worker")
                 if worker is not None:
                     await worker.close(drain=False)
@@ -59,6 +61,7 @@ class WorkerDiscordBotAdapter:
         except TypeError:
             orchestrator = self.orchestrator_factory()
             orchestrator.discord = output_adapter
+        orchestrator_box["orchestrator"] = orchestrator
         worker = AsyncCommandWorker(
             orchestrator.handle,
             max_queue_size=self.worker_queue_size,
@@ -89,8 +92,14 @@ class WorkerDiscordBotAdapter:
                 activity=discord.Game(name=f"mode: {display_mode}"),
             )
 
+        def cancel_active(reason: str) -> int:
+            cancel = getattr(orchestrator, "cancel_active", None)
+            return int(cancel(reason)) if callable(cancel) else 0
+
         async def handle(interaction: discord.Interaction, command: Command) -> None:
             await interaction.response.defer(thinking=True)
+            if command.name in {"pause", "stop"}:
+                await asyncio.to_thread(cancel_active, f"Discord /re {command.name}")
             if command.name == "stop":
                 await sync_presence("finalizing")
             try:
@@ -126,13 +135,20 @@ class WorkerDiscordBotAdapter:
         async def re_status(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("status"))
 
-        @re.command(name="pause", description="現在の研究セッションを一時停止します。")
+        @re.command(name="pause", description="実行中Agentを停止し、研究セッションを一時停止します。")
         async def re_pause(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("pause"))
 
-        @re.command(name="resume", description="一時停止中の研究セッションを再開します。")
+        @re.command(name="resume", description="checkpointから研究セッションを再開します。")
         async def re_resume(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("resume"))
+
+        @re.command(name="cancel", description="実行中Agentプロセスだけを直ちに停止します。")
+        async def re_cancel(interaction: discord.Interaction) -> None:
+            await interaction.response.defer(thinking=True)
+            count = await asyncio.to_thread(cancel_active, "Discord /re cancel")
+            await reply(interaction, f"実行中Agentへ停止要求を送りました。対象プロセス: {count}")
+            await sync_presence()
 
         @re.command(name="search", description="指定queryで既存研究を検索します。")
         async def re_search(interaction: discord.Interaction, query: str) -> None:
@@ -170,15 +186,15 @@ class WorkerDiscordBotAdapter:
         async def re_revise(interaction: discord.Interaction, gate_id: str, reason: str) -> None:
             await handle(interaction, Command("revise", {"gate_id": gate_id, "reason": reason}))
 
-        @re.command(name="approve", description="危険操作やコスト上限の承認待ちAPを許可します。")
+        @re.command(name="approve", description="危険操作やfail-closedの承認待ちAPを許可します。")
         async def re_approve(interaction: discord.Interaction, approval_id: str) -> None:
             await handle(interaction, Command("approve", {"approval_id": approval_id}))
 
-        @re.command(name="reject", description="危険操作やコスト上限の承認待ちAPを却下します。")
+        @re.command(name="reject", description="承認待ちAPを却下します。")
         async def re_reject(interaction: discord.Interaction, approval_id: str, reason: str) -> None:
             await handle(interaction, Command("reject", {"approval_id": approval_id, "reason": reason}))
 
-        @re.command(name="stop", description="現在の研究セッションを終了し、レポートを生成します。")
+        @re.command(name="stop", description="実行中Agentを停止し、研究セッションを終了します。")
         async def re_stop(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("stop"))
 

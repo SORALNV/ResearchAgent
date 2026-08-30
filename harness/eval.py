@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -44,7 +45,7 @@ def run_golden_eval(
     journal_entries: Iterable[dict[str, Any]] | None = None,
     research_dir: Path | None = None,
 ) -> EvalResult:
-    """Evaluate the produced answer, citation integrity, and execution trace.
+    """Evaluate produced content, citation integrity, and execution trace.
 
     The legacy two-argument call remains supported. If no generated answer is
     supplied, paper summaries are used as a compatibility corpus.
@@ -166,6 +167,7 @@ def run_golden_eval(
         f"execution_success={execution_successes}/{execution_calls}, "
         f"review_success={review_successes}/{review_calls}, "
         f"artifact_integrity_ok={artifact_integrity_ok}, "
+        f"artifact_errors={len(artifact_errors)}, "
         f"overall_score={overall_score}"
     )
     return EvalResult(
@@ -249,7 +251,8 @@ def _artifact_integrity(
 ) -> tuple[bool, list[str]]:
     if research_dir is None:
         return True, []
-    final_root = research_dir / "artifacts" / "final"
+    research_root = research_dir.resolve()
+    final_root = (research_root / "artifacts" / "final").resolve()
     if not final_root.exists():
         return True, []
 
@@ -263,11 +266,59 @@ def _artifact_integrity(
             continue
         for item in payload.get("errors", []):
             errors.append(str(item))
-        for item in payload.get("promoted", []):
+        promoted = payload.get("promoted", [])
+        if not isinstance(promoted, list):
+            errors.append(f"{manifest}: promoted must be a list")
+            continue
+        for item in promoted:
             if not isinstance(item, dict):
                 errors.append(f"{manifest}: invalid promoted entry")
                 continue
-            destination = Path(str(item.get("destination") or ""))
+            destination_value = str(item.get("destination") or "").strip()
+            if not destination_value:
+                errors.append(f"{manifest}: promoted destination missing")
+                continue
+            candidate = Path(destination_value)
+            if not candidate.is_absolute():
+                candidate = research_root / candidate
+            if candidate.is_symlink():
+                errors.append(f"promoted artifact is a symlink: {candidate}")
+                continue
+            try:
+                destination = candidate.resolve()
+                destination.relative_to(final_root)
+            except (OSError, ValueError):
+                errors.append(f"promoted artifact escapes final root: {candidate}")
+                continue
             if not destination.is_file():
                 errors.append(f"missing promoted artifact: {destination}")
+                continue
+
+            expected_hash = str(item.get("sha256") or "").strip().lower()
+            if not expected_hash:
+                errors.append(f"missing promoted artifact hash: {destination}")
+            else:
+                actual_hash = _sha256(destination)
+                if actual_hash != expected_hash:
+                    errors.append(
+                        f"promoted artifact hash mismatch: {destination}"
+                    )
+
+            try:
+                expected_size = int(item.get("size_bytes"))
+            except (TypeError, ValueError):
+                errors.append(f"invalid promoted artifact size: {destination}")
+            else:
+                if destination.stat().st_size != expected_size:
+                    errors.append(
+                        f"promoted artifact size mismatch: {destination}"
+                    )
     return not errors, errors
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

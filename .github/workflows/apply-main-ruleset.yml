@@ -1,0 +1,22 @@
+name: apply-main-ruleset
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply or update repository ruleset
+        env:
+          GITHUB_ADMIN_TOKEN: ${{ secrets.REPOSITORY_ADMIN_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/apply_repository_ruleset.py

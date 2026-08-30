@@ -136,9 +136,9 @@ def test_real_pipeline_parallel_review_retry_fresh_and_integration(tmp_path, mon
     starts = {}
     ends = {}
     for role, stage, task_id, event, timestamp in events:
-        if role == "sub" and task_id in {"S1", "S2"} and stage == "sub_retry":
+        if role == "sub" and task_id in {"S1", "S2"} and stage == "sub_execute":
             target = starts if event == "start" else ends
-            target.setdefault(task_id, float(timestamp))
+            target[task_id] = float(timestamp)
     assert set(starts) == {"S1", "S2"}
     assert max(starts.values()) < min(ends.values()), "initial sub-agent calls did not overlap"
 
@@ -159,6 +159,7 @@ def test_single_configured_command_makes_all_roles_real(tmp_path, monkeypatch):
     assert "main_plan" in stages
     assert stages.count("sub_execute") == 2
     assert "review" in stages
+    assert "sub_retry" in stages
     assert "fresh" in stages
     assert "main_integrate" in stages
     assert output.decision == "accept"

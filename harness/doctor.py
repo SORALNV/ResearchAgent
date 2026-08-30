@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -21,13 +22,36 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
         DoctorCheck("important_channel", bool(config.discord_important_channel_id), config.discord_important_channel_id or "未設定"),
         DoctorCheck("log_channel", bool(config.discord_log_channel_id), config.discord_log_channel_id or "未設定"),
         DoctorCheck("paper_provider", config.paper_provider in {"fake", "arxiv"}, config.paper_provider),
+        DoctorCheck("agent_home_mode", config.agent_home_mode == "isolated", config.agent_home_mode),
+        DoctorCheck(
+            "agent_env_allowlist",
+            not any(item.upper().startswith("DISCORD_") for item in config.agent_env_allowlist),
+            ", ".join(config.agent_env_allowlist) or "empty (secure default)",
+        ),
+        DoctorCheck("checkpoint_enabled", config.checkpoint_enabled, str(config.checkpoint_enabled)),
+        DoctorCheck("artifact_promotion_enabled", config.artifact_promotion_enabled, str(config.artifact_promotion_enabled)),
+        DoctorCheck(
+            "multi_agent_limits",
+            config.sub_agent_count >= 1 and config.agent_parallelism >= 1,
+            (
+                f"subs={config.sub_agent_count}, parallelism={config.agent_parallelism}, "
+                f"review_retries={config.max_review_retries}, protocol_retries={config.max_protocol_retries}"
+            ),
+        ),
         _command_check("codex", ["codex", "--version"]),
     ]
-    if config.sub_agent_command:
-        executable = config.sub_agent_command.split()[0]
-        checks.append(_command_check(f"sub_agent_command:{executable}", [executable, "--version"]))
-    else:
-        checks.append(DoctorCheck("sub_agent_command", False, "未設定"))
+    for role, command_text in (
+        ("main_agent_command", config.main_agent_command),
+        ("sub_agent_command", config.sub_agent_command),
+        ("review_agent_command", config.review_agent_command),
+        ("fresh_agent_command", config.fresh_agent_command),
+        ("claude_agent_command", config.claude_agent_command),
+    ):
+        if command_text:
+            executable = shlex.split(command_text)[0]
+            checks.append(_command_check(f"{role}:{executable}", [executable, "--version"]))
+        else:
+            checks.append(DoctorCheck(role, False, "未設定 (role fallback may apply)"))
     return checks
 
 
@@ -60,4 +84,3 @@ def _command_check(name: str, command: list[str]) -> DoctorCheck:
     output = (completed.stdout or completed.stderr).strip().splitlines()
     detail = output[0] if output else f"returncode={completed.returncode}"
     return DoctorCheck(name, completed.returncode == 0, detail)
-

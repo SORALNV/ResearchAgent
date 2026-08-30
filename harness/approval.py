@@ -24,7 +24,6 @@ class ApprovalGate:
         "rmdir",
         "folder_delete",
         "directory_delete",
-        "remove",
         "overwrite",
         "outside_research_archive",
         "push",
@@ -39,6 +38,11 @@ class ApprovalGate:
         "sudo",
         "chmod",
         "chown",
+        # Harness-internal fail-closed conditions.
+        "agent_protocol_failure",
+        "review_unresolved",
+        "artifact_promotion_failure",
+        "sub_agent_failure",
     )
     IMPORTANT_NOTICE_KEYWORDS = (
         "long_running_job",

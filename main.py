@@ -7,16 +7,19 @@ from harness.command_parser import parse_research_command
 from harness.commands import Command, CommandContext
 from harness.config import HarnessConfig
 from harness.discord_adapter import FakeDiscordAdapter
-from harness.orchestrator import ResearchOrchestrator
+from harness.hardened_orchestrator import HardenedResearchOrchestrator
 from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
 
-def build_orchestrator(workdir: Path, research_archive_dir: Path | None = None) -> ResearchOrchestrator:
+def build_orchestrator(
+    workdir: Path,
+    research_archive_dir: Path | None = None,
+) -> HardenedResearchOrchestrator:
     config = HarnessConfig.from_env(workdir, research_archive_dir)
-    return ResearchOrchestrator(config=config, discord=FakeDiscordAdapter())
+    return HardenedResearchOrchestrator(config=config, discord=FakeDiscordAdapter())
 
 
-def _print_result(orchestrator: ResearchOrchestrator, command: Command) -> None:
+def _print_result(orchestrator: HardenedResearchOrchestrator, command: Command) -> None:
     result = orchestrator.handle(command, CommandContext(actor="local", source="cli"))
     print(result.message)
     if not result.ok:
@@ -24,7 +27,7 @@ def _print_result(orchestrator: ResearchOrchestrator, command: Command) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ResearchAgent harness MVP")
+    parser = argparse.ArgumentParser(description="ResearchAgent harness")
     parser.add_argument("--workdir", default=".", help="Workspace for state, journal, and brief files.")
     parser.add_argument(
         "--research-archive-dir",
@@ -84,7 +87,7 @@ def main() -> None:
     reject.add_argument("reason")
     sub.add_parser("stop")
     demo = sub.add_parser("demo")
-    demo.add_argument("--goal", default="研究ハーネスMVPのE2Eを検証する")
+    demo.add_argument("--goal", default="研究ハーネスのE2Eを検証する")
 
     bot = sub.add_parser("bot")
     bot.add_argument("--token", default=None)
@@ -93,7 +96,11 @@ def main() -> None:
     args = parser.parse_args()
     workdir = Path(args.workdir).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
-    research_archive_dir = Path(args.research_archive_dir).expanduser().resolve() if args.research_archive_dir else None
+    research_archive_dir = (
+        Path(args.research_archive_dir).expanduser().resolve()
+        if args.research_archive_dir
+        else None
+    )
 
     if args.command == "bot":
         config = HarnessConfig.from_env(workdir, research_archive_dir)
@@ -101,11 +108,12 @@ def main() -> None:
         if not token:
             raise SystemExit("DISCORD_BOT_TOKEN or --token is required for the real bot.")
         WorkerDiscordBotAdapter(
-            orchestrator_factory=lambda discord: ResearchOrchestrator(config, discord=discord),
+            orchestrator_factory=lambda discord: HardenedResearchOrchestrator(config, discord=discord),
             token=token,
             channel_id=args.channel_id or config.discord_channel_id,
             important_channel_id=config.discord_important_channel_id,
             log_channel_id=config.discord_log_channel_id,
+            worker_queue_size=config.discord_worker_queue_size,
         ).run()
         return
 
@@ -171,10 +179,7 @@ def main() -> None:
             "/re eval",
             "/re stop",
         ]:
-            if content.startswith("/"):
-                result = fake.inject(orchestrator, content)
-            else:
-                result = fake.inject_message(orchestrator, content)
+            result = fake.inject(orchestrator, content) if content.startswith("/") else fake.inject_message(orchestrator, content)
             if result:
                 print(result.message)
 

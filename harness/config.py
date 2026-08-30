@@ -13,6 +13,25 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _csv_env(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    return tuple(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     project_root: Path
@@ -38,6 +57,25 @@ class HarnessConfig:
     paper_provider: str = "fake"
     research_archive_dir: Path | None = None
 
+    # Real multi-agent execution.
+    sub_agent_count: int = 3
+    agent_parallelism: int = 3
+    max_review_retries: int = 1
+    max_protocol_retries: int = 1
+    agent_output_char_limit: int = 12000
+
+    # Agent process hardening.
+    agent_env_allowlist: tuple[str, ...] = ()
+    agent_home_mode: str = "isolated"
+    agent_cancel_grace_seconds: float = 3.0
+    checkpoint_enabled: bool = True
+    artifact_promotion_enabled: bool = True
+    artifact_max_files: int = 500
+    artifact_max_bytes: int = 100 * 1024 * 1024
+
+    # Discord worker.
+    discord_worker_queue_size: int = 32
+
     @classmethod
     def from_env(
         cls,
@@ -52,6 +90,9 @@ class HarnessConfig:
         archive_path = Path(archive_raw).expanduser()
         if not archive_path.is_absolute():
             archive_path = root / archive_path
+        home_mode = os.getenv("AGENT_HOME_MODE", "isolated").strip().lower()
+        if home_mode not in {"isolated", "preserve"}:
+            home_mode = "isolated"
         return cls(
             project_root=root,
             discord_bot_token=os.getenv("DISCORD_BOT_TOKEN") or None,
@@ -80,6 +121,19 @@ class HarnessConfig:
             max_command_seconds=_int_env("MAX_COMMAND_SECONDS", 300),
             paper_provider=os.getenv("PAPER_PROVIDER", "fake"),
             research_archive_dir=archive_path,
+            sub_agent_count=max(1, _int_env("SUB_AGENT_COUNT", 3)),
+            agent_parallelism=max(1, _int_env("AGENT_PARALLELISM", 3)),
+            max_review_retries=max(0, _int_env("MAX_REVIEW_RETRIES", 1)),
+            max_protocol_retries=max(0, _int_env("MAX_PROTOCOL_RETRIES", 1)),
+            agent_output_char_limit=max(0, _int_env("AGENT_OUTPUT_CHAR_LIMIT", 12000)),
+            agent_env_allowlist=_csv_env("AGENT_ENV_ALLOWLIST"),
+            agent_home_mode=home_mode,
+            agent_cancel_grace_seconds=max(0.1, _float_env("AGENT_CANCEL_GRACE_SECONDS", 3.0)),
+            checkpoint_enabled=_bool_env("CHECKPOINT_ENABLED", True),
+            artifact_promotion_enabled=_bool_env("ARTIFACT_PROMOTION_ENABLED", True),
+            artifact_max_files=max(1, _int_env("ARTIFACT_MAX_FILES", 500)),
+            artifact_max_bytes=max(1, _int_env("ARTIFACT_MAX_BYTES", 100 * 1024 * 1024)),
+            discord_worker_queue_size=max(1, _int_env("DISCORD_WORKER_QUEUE_SIZE", 32)),
         )
 
     @property

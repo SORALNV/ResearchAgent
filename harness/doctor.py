@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from harness.config import HarnessConfig
 from harness.sandbox import sandbox_capability
@@ -17,7 +18,41 @@ class DoctorCheck:
 
 
 def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
-    sandbox_ok, sandbox_detail = sandbox_capability(config)
+    configured_commands = [
+        command
+        for command in (
+            config.main_agent_command,
+            config.sub_agent_command,
+            config.review_agent_command,
+            config.fresh_agent_command,
+            config.claude_agent_command,
+        )
+        if command
+    ]
+    generic_commands = [
+        command for command in configured_commands if not _is_bare_codex(command)
+    ]
+    if generic_commands:
+        sandbox_ok, sandbox_detail = sandbox_capability(config)
+        sandbox_detail = (
+            f"required for {len(generic_commands)} generic command(s); "
+            f"{sandbox_detail}"
+        )
+        unsandboxed_ok = not (
+            config.agent_sandbox_backend == "none"
+            and config.agent_allow_unsandboxed_generic
+        )
+        unsandboxed_detail = str(config.agent_allow_unsandboxed_generic)
+    else:
+        sandbox_ok = True
+        sandbox_detail = (
+            "not required; all configured commands use the Codex sandbox"
+            if configured_commands
+            else "not required; no real-agent command configured"
+        )
+        unsandboxed_ok = True
+        unsandboxed_detail = "not applicable"
+
     checks = [
         DoctorCheck("project_root", config.project_root.exists(), str(config.project_root)),
         DoctorCheck(
@@ -63,11 +98,8 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
         ),
         DoctorCheck(
             "unsandboxed_generic",
-            not (
-                config.agent_sandbox_backend == "none"
-                and config.agent_allow_unsandboxed_generic
-            ),
-            str(config.agent_allow_unsandboxed_generic),
+            unsandboxed_ok,
+            unsandboxed_detail,
         ),
         DoctorCheck(
             "checkpoint_enabled",
@@ -151,3 +183,11 @@ def _command_check(name: str, command: list[str]) -> DoctorCheck:
     output = (completed.stdout or completed.stderr).strip().splitlines()
     detail = output[0] if output else f"returncode={completed.returncode}"
     return DoctorCheck(name, completed.returncode == 0, detail)
+
+
+def _is_bare_codex(command_text: str) -> bool:
+    try:
+        parts = shlex.split(command_text)
+    except ValueError:
+        return False
+    return len(parts) == 1 and Path(parts[0]).name == "codex"

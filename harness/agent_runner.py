@@ -8,6 +8,7 @@ from pathlib import Path
 from harness.approval import ProposedOperation
 from harness.config import HarnessConfig
 from harness.conversation import ConversationSession
+from harness.process_manager import build_agent_environment
 from harness.state import ResearchSession
 
 
@@ -37,7 +38,7 @@ class RoundOutput:
 
 
 class MockAgentRunner:
-    """Compatibility facade: mock without commands, real multi-agent execution with commands."""
+    """Compatibility facade: mock without commands, hardened real runner with commands."""
 
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
@@ -76,7 +77,7 @@ class MockAgentRunner:
             ]
         )
         fresh = None
-        if round_number % self.config.fresh_interval == 0:
+        if self.config.fresh_interval > 0 and round_number % self.config.fresh_interval == 0:
             fresh = f"Fresh stub: {self.prompts['fresh']} 実エージェント接続前に失敗時再開シナリオを試す。"
         claude = None
         if round_number == 1:
@@ -107,6 +108,15 @@ class MockAgentRunner:
             next_action="承認待ちを解消する" if proposed_operation else "次の研究ラウンドへ進む",
         )
 
+    def cancel_active(self, reason: str = "cancel requested") -> int:
+        if self._real_runner is None:
+            return 0
+        return self._real_runner.cancel_active(reason)
+
+    def reset_cancellation(self) -> None:
+        if self._real_runner is not None:
+            self._real_runner.reset_cancellation()
+
     def _load_prompts(self, prompt_dir: Path) -> dict[str, str]:
         prompts = dict(DEFAULT_PROMPTS)
         for role in prompts:
@@ -124,13 +134,20 @@ class SubAgentCommandRunner:
 
     def run(self, session: ResearchSession, round_number: int, task: str) -> str:
         if self.config.max_agent_calls > 0 and session.cost.agent_calls >= self.config.max_agent_calls:
-            return (
-                "Real sub-agent skipped: MAX_AGENT_CALLS reached. "
-                "続行するには設定変更または承認が必要。"
-            )
+            return "Real sub-agent skipped: MAX_AGENT_CALLS reached. 続行するには設定変更または承認が必要。"
         session.cost.agent_calls += 1
         command = self._build_command(session)
         prompt = self._build_prompt(session, round_number, task)
+        cwd = Path(session.research_dir or self.config.project_root)
+        cwd.mkdir(parents=True, exist_ok=True)
+        environment = build_agent_environment(
+            self.config,
+            session,
+            role="sub",
+            stage="legacy_sub_execute",
+            task_id=None,
+            working_dir=cwd,
+        )
         try:
             completed = subprocess.run(
                 command,
@@ -138,14 +155,14 @@ class SubAgentCommandRunner:
                 text=True,
                 capture_output=True,
                 timeout=self.config.max_command_seconds,
-                cwd=session.research_dir or str(self.config.project_root),
+                cwd=cwd,
+                env=environment,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             return (
                 "Real sub-agent timeout: "
-                f"{self.config.sub_agent_command} exceeded {self.config.max_command_seconds}s. "
-                "結果は未確認。"
+                f"{self.config.sub_agent_command} exceeded {self.config.max_command_seconds}s. 結果は未確認。"
             )
         stdout = completed.stdout.strip()
         stderr = completed.stderr.strip()
@@ -162,16 +179,9 @@ class SubAgentCommandRunner:
         executable = Path(parts[0]).name if parts else ""
         if executable == "codex" and len(parts) == 1:
             return [
-                parts[0],
-                "exec",
-                "--cd",
-                session.research_dir or str(self.config.project_root),
-                "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
-                "--ask-for-approval",
-                "never",
-                "-",
+                parts[0], "exec", "--cd", session.research_dir or str(self.config.project_root),
+                "--skip-git-repo-check", "--sandbox", "workspace-write",
+                "--ask-for-approval", "never", "-",
             ]
         return parts
 

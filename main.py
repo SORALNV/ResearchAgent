@@ -6,8 +6,9 @@ from pathlib import Path
 from harness.command_parser import parse_research_command
 from harness.commands import Command, CommandContext
 from harness.config import HarnessConfig
-from harness.discord_adapter import DiscordBotAdapter, FakeDiscordAdapter
+from harness.discord_adapter import FakeDiscordAdapter
 from harness.orchestrator import ResearchOrchestrator
+from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
 
 def build_orchestrator(workdir: Path, research_archive_dir: Path | None = None) -> ResearchOrchestrator:
@@ -35,7 +36,7 @@ def main() -> None:
     re = sub.add_parser("re")
     re_sub = re.add_subparsers(dest="re_command", required=True)
     re_sub.add_parser("new")
-    re_plan = re_sub.add_parser("plan")
+    re_sub.add_parser("plan")
     re_sub.add_parser("start")
     re_sub.add_parser("status")
     re_sub.add_parser("pause")
@@ -99,7 +100,7 @@ def main() -> None:
         token = args.token or config.discord_bot_token
         if not token:
             raise SystemExit("DISCORD_BOT_TOKEN or --token is required for the real bot.")
-        DiscordBotAdapter(
+        WorkerDiscordBotAdapter(
             orchestrator_factory=lambda discord: ResearchOrchestrator(config, discord=discord),
             token=token,
             channel_id=args.channel_id or config.discord_channel_id,

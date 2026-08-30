@@ -1,31 +1,50 @@
-# ResearchAgent Harness MVP
+# ResearchAgent Harness
 
-ResearchAgent is a small control layer for running research sessions from Discord or a local CLI. The MVP intentionally does not run real Claude, Codex, or sub-agent processes. It uses `MockAgentRunner` to prove the end-to-end harness loop first.
+ResearchAgent is a persistent control plane for running research sessions from Discord or a local CLI. It keeps the research goal, constraints, literature evidence, decisions, approvals, execution traces, and final artifacts in versioned research folders.
+
+The system is designed for **orchestration rather than single-LLM completion**. When real agent commands are configured, a research round uses a real multi-agent pipeline:
+
+```text
+main plan
+  ↓
+multiple sub agents in parallel
+  ↓
+review
+  ↓
+selective sub retry when needed
+  ↓
+fresh independent view
+  ↓
+main integration
+```
+
+If no agent command is configured, the deterministic `MockAgentRunner` remains available for local demos and regression tests.
 
 ## Design Philosophy
 
-This harness should not try to solve most of the research problem by itself. Treat it as a large, persistent `AGENTS.md` plus an execution journal: it keeps the goal, constraints, source evidence, decisions, approvals, and next actions in one durable place.
+ResearchAgent should behave like a large, persistent `AGENTS.md` plus an execution journal. The harness records and routes work instead of pretending one model can simultaneously be the researcher, executor, reviewer, and final judge.
 
-The default design is orchestration, not single-LLM completion. Planning dialogue is used to clarify intent and decide which tools or agents to call. Literature search is a tool that the LLM may call when useful. Research execution should be split across roles such as main, sub, review, and fresh so that the system can propose, execute, critique, and add alternative views without depending on one model's answer as final truth.
+Planning dialogue clarifies intent and can trigger literature search. Research execution is split across roles such as `main`, `sub`, `review`, `fresh`, and optional Claude consultation. Dangerous operations remain behind the existing approval gate.
 
-The harness records and routes work. It should avoid pretending to be the researcher, the reviewer, the executor, and the judge all at once.
+## What It Includes
 
-## What This MVP Includes
-
-- Discord slash-command entry point with an optional `discord.py` adapter
-- Fake Discord adapter for local tests and demos
+- Discord slash-command entry point and local CLI
 - `PLANNING`, `RESEARCH`, `APPROVAL_BLOCKED`, `PAUSED`, and `DONE` modes
-- `/re new -> PLANNING -> /re start -> RESEARCH -> /re stop` flow
-- per-research versioned folders under `research_runs/V001.0_{session_id}_{slug}/`
-- per-research `research_brief.md`, `journal.jsonl`, `papers.jsonl`, `state.json`, and `artifacts/`
-- deterministic `MockAgentRunner` roles for main, sub, review, fresh, and Claude-stub consultation
-- bounded conversation sessions with `max_turns`, timeout, and stagnation stopping
-- approval gate dry-run for dangerous operations
-- optional real `sub` agent through `SUB_AGENT_COMMAND=codex`
-- Phase A literature search with `papers.jsonl`
-- citation IDs for paper-backed notes
-- session cost counters and hard-limit blocking
-- simple golden-question evaluation
+- normal Discord messages for PLANNING dialogue
+- versioned research folders under `research_runs/V001.0_{session_id}_{slug}/`
+- durable `research_brief.md`, `journal.jsonl`, `papers.jsonl`, `research_ledger.jsonl`, `state.json`, reports, and artifacts
+- real multi-agent execution when any agent command is configured
+- multiple parallel sub agents with isolated per-task workspaces
+- reviewer-driven selective retry
+- fresh independent perspective and final main integration
+- optional Claude consultation
+- arXiv literature search and citation IDs
+- novelty / phase gates
+- dangerous-operation approval gate
+- cost counters and hard limits
+- golden-question evaluation
+- Discord command worker so long-running research does not block the Discord event loop
+- GitHub Actions CI for Python 3.11 and 3.12
 
 ## Setup
 
@@ -34,55 +53,73 @@ cd /home/jetson/Code/ResearchAgent
 python -m venv .venv
 . .venv/bin/activate
 pip install -e .[test]
-```
-
-For the real Discord bot entry point:
-
-```bash
-pip install -e .[discord]
 cp .env.example .env
 ```
 
-Fill in `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID` in `.env` or export them in your shell.
-For channel separation, set `DISCORD_IMPORTANT_CHANNEL_ID` for high-priority reports and approval requests, and `DISCORD_LOG_CHANNEL_ID` for detailed event logs. `DISCORD_CHANNEL_ID` remains as the legacy fallback for the important channel.
+For Discord:
+
+```bash
+pip install -e .[discord]
+```
+
+Set at least:
+
+```env
+DISCORD_BOT_TOKEN=...
+DISCORD_IMPORTANT_CHANNEL_ID=...
+DISCORD_LOG_CHANNEL_ID=...
+```
+
+For real Codex-backed research roles:
+
+```env
+MAIN_AGENT_COMMAND=codex
+SUB_AGENT_COMMAND=codex
+REVIEW_AGENT_COMMAND=codex
+FRESH_AGENT_COMMAND=codex
+```
+
+A missing role falls back to another configured command. Therefore even `SUB_AGENT_COMMAND=codex` alone is enough to switch research rounds from the deterministic mock path to real role-specific Codex calls.
+
+Recommended execution settings:
+
+```env
+SUB_AGENT_COUNT=3
+AGENT_PARALLELISM=3
+MAX_REVIEW_RETRIES=1
+FRESH_INTERVAL=1
+MAX_COMMAND_SECONDS=300
+DISCORD_WORKER_QUEUE_SIZE=32
+```
+
+Use finite `MAX_AGENT_CALLS` and `MAX_COMMAND_SECONDS` for paid or unattended operation.
 
 ## Local Demo
 
-The local demo uses the Fake Discord adapter and writes artifacts under the chosen workdir.
+Without real agent command variables, the local demo intentionally uses deterministic mock execution:
 
 ```bash
-python main.py --workdir /tmp/research-agent-demo demo --goal "研究ハーネスMVPを検証する"
+python main.py --workdir /tmp/research-agent-demo demo --goal "研究ハーネスを検証する"
 ```
 
-Expected outputs:
-
-- `/tmp/research-agent-demo/research_runs/V001.0_{session_id}_{slug}/research_brief.md`
-- `/tmp/research-agent-demo/research_runs/V001.0_{session_id}_{slug}/journal.jsonl`
-- `/tmp/research-agent-demo/research_runs/V001.0_{session_id}_{slug}/papers.jsonl`
-- `/tmp/research-agent-demo/research_runs/V001.0_{session_id}_{slug}/state.json`
-- `/tmp/research-agent-demo/research_runs/V001.0_{session_id}_{slug}/artifacts/`
-- `/tmp/research-agent-demo/state.json`
-
-The root `state.json` is only an active-session pointer. The durable research record lives in the versioned research folder.
-
-The demo runs:
+Expected durable outputs include:
 
 ```text
-/re new -> /re plan -> /re search -> /re papers -> /re cost -> /re start -> approval gate -> /re approve AP-1 -> /re eval -> /re stop
+/tmp/research-agent-demo/
+├── state.json
+└── research_runs/
+    └── V001.0_{session_id}_{slug}/
+        ├── state.json
+        ├── journal.jsonl
+        ├── research_brief.md
+        ├── papers.jsonl
+        ├── research_ledger.jsonl
+        ├── run_summary.md
+        └── artifacts/
+            └── report.md
 ```
 
-To choose a different archive location:
-
-```bash
-python main.py \
-  --workdir /tmp/research-agent-runtime \
-  --research-archive-dir /data/research-archive \
-  re new
-python main.py \
-  --workdir /tmp/research-agent-runtime \
-  --research-archive-dir /data/research-archive \
-  re plan
-```
+The root `state.json` is only the active-session pointer. The durable research record lives in the versioned research folder.
 
 ## CLI Commands
 
@@ -95,50 +132,31 @@ python main.py --workdir /tmp/research-agent-demo re pause
 python main.py --workdir /tmp/research-agent-demo re resume
 python main.py --workdir /tmp/research-agent-demo re redirect "制約や方針変更"
 python main.py --workdir /tmp/research-agent-demo re idea "追加アイデア"
-python main.py --workdir /tmp/research-agent-demo re scout
-python main.py --workdir /tmp/research-agent-demo re scout "custom search query"
-python main.py --workdir /tmp/research-agent-demo re search "research agent harness citation"
+python main.py --workdir /tmp/research-agent-demo re search "research agent citation grounding"
 python main.py --workdir /tmp/research-agent-demo re papers
 python main.py --workdir /tmp/research-agent-demo re paper P-001
 python main.py --workdir /tmp/research-agent-demo re eval
 python main.py --workdir /tmp/research-agent-demo re cost
 python main.py --workdir /tmp/research-agent-demo re doctor
 python main.py --workdir /tmp/research-agent-demo re runs
+python main.py --workdir /tmp/research-agent-demo re accept PG-1
+python main.py --workdir /tmp/research-agent-demo re revise PG-1 "比較対象を変える"
 python main.py --workdir /tmp/research-agent-demo re approve AP-1
 python main.py --workdir /tmp/research-agent-demo re reject AP-1 "理由"
 python main.py --workdir /tmp/research-agent-demo re stop
 ```
 
-The older direct commands such as `goal` and `start` remain as developer shortcuts, but the user-facing path is the `re` command group.
+The internal similar-research scout is triggered from PLANNING dialogue or explicit paper search logic; `/re scout` is not a public command.
 
 ## Discord Bot
 
-The real bot is intentionally thin. It converts slash commands into the same `Command` objects used by the CLI, then calls the synchronous orchestrator.
+Start the real bot with:
 
 ```bash
-export DISCORD_BOT_TOKEN="..."
-export DISCORD_IMPORTANT_CHANNEL_ID="..."
-export DISCORD_LOG_CHANNEL_ID="..."
 python main.py --workdir ./runtime bot
 ```
 
-## Discord Channels
-
-The harness can split Discord output into two channels:
-
-- Important channel: periodic reports, approval requests, cost-limit stops, and user-facing command results.
-- Log channel: compact event stream for nearly every `journal.jsonl` event.
-
-Configure them with:
-
-```env
-DISCORD_IMPORTANT_CHANNEL_ID=123456789012345678
-DISCORD_LOG_CHANNEL_ID=234567890123456789
-```
-
-If `DISCORD_LOG_CHANNEL_ID` is empty, detailed logs still go to `journal.jsonl` but are not posted to Discord. If `DISCORD_IMPORTANT_CHANNEL_ID` is empty, `DISCORD_CHANNEL_ID` is used as a fallback.
-
-Supported slash commands:
+Supported slash commands include:
 
 - `/re new`
 - `/re plan`
@@ -159,58 +177,125 @@ Supported slash commands:
 - `/re reject <approval_id> <reason>`
 - `/re stop`
 
+After `/re plan`, ordinary messages in the important channel are treated as PLANNING dialogue until the mode changes.
+
+### Discord Worker
+
+Discord no longer calls the synchronous orchestrator directly on the event-loop thread. Commands go through a bounded `AsyncCommandWorker`:
+
+```text
+Discord interaction/message
+        ↓
+AsyncCommandWorker queue
+        ↓
+asyncio.to_thread(orchestrator.handle)
+        ↓
+serialized state/journal mutation
+```
+
+There is intentionally one command consumer. Long-running agent subprocesses therefore run off the Discord event loop, while state transitions, journal writes, ledger writes, and report generation remain ordered. If the queue reaches `DISCORD_WORKER_QUEUE_SIZE`, the user receives an explicit busy response.
+
 ## Mode Flow
 
-Recommended Discord flow:
+Recommended flow:
 
 ```text
 /re new
 /re plan
-normal Discord messages for the research idea and PLANNING dialogue
+normal Discord PLANNING dialogue
+optional literature search / novelty gate
 /re start
+RESEARCH
+approval or phase gate if required
+DONE
+/re stop
 ```
 
-`/re new` finishes the current active theme if needed, generates its closing artifacts, and creates a fresh versioned research folder with the goal still unset. `/re plan` switches into plan mode. After that, normal messages in the important channel are treated as PLANNING dialogue turns until `/re new`, `/re stop`, or `/re start` changes the mode. The first normal message can be the new research idea.
+`/re new` closes the prior active theme when needed and creates a new versioned research folder. `/re plan` enables dialogue. `/re start` enters `RESEARCH` only when blocking phase gates are resolved.
 
-During dialogue mode, the main planning agent should behave like an orchestrator-facing conversation partner. It may decide to use the paper-search tool, propose sub/review/fresh consultation, or ask Sora to clarify constraints. The harness records the dialogue, evidence, decisions, and next actions; it should not treat one LLM response as the final research answer.
+## Real Multi-Agent Execution
 
-The Discord bot presence shows the current user-facing mode:
+When at least one agent command is configured, every research round uses real agents.
 
-- `mode: Neutral`: no active planning conversation, finished session, or waiting for `/re plan`
-- `mode: plan`: ordinary messages are treated as PLANNING dialogue
-- `mode: researching`: research rounds are running or ready to continue
-- `mode: blocked`: approval, cost, phase gate, or safety gate is waiting for Sora
-- `mode: finalizing`: stop/summary/report cleanup is in progress
+### 1. main plan
 
-After `/re plan`, ordinary Discord messages in the important channel continue the PLANNING wall-ball conversation. On each turn, the LLM may decide to call the paper-search tool and must generate the search query itself. This is the intended place to decide the concrete theme, primary comparison, differentiation point, and first deliverable before `/re start`.
+The main role receives the research goal and current question and returns structured independent subtasks.
 
-`/re start` moves the session to `RESEARCH` and runs `MockAgentRunner`. The first round proposes a dangerous dry-run operation so the approval gate can be tested. The harness switches to `APPROVAL_BLOCKED`, reports an `@Sora` approval request, and waits for `/re approve AP-1` or `/re reject AP-1 <reason>`.
+### 2. parallel sub execution
 
-If the internal novelty gate has produced a blocking result, `/re start` stays in `PLANNING` and posts an important-channel phase-gate decision request instead of entering `RESEARCH`. Use `/re accept PG-1` to proceed despite the risk, or `/re revise PG-1 <reason>` to keep planning and record the revision reason.
+Up to `SUB_AGENT_COUNT` tasks run concurrently, bounded by `AGENT_PARALLELISM`. Each sub task receives its own durable writable workspace:
 
-`/re approve` records the approval and continues research rounds until `MAX_ROUNDS`. `/re stop` marks the session `DONE` and posts a journal summary.
+```text
+artifacts/agent_workspaces/
+└── R001/
+    ├── S1/
+    │   ├── attempt-01/
+    │   └── attempt-02/
+    └── S2/
+        └── attempt-01/
+```
 
-## Planning Dialogue And Scout
+This prevents parallel agents from overwriting the same files and preserves every attempt for audit.
 
-`/re plan` and normal PLANNING messages let the LLM decide whether to run similar-research search. If Sora says things like "これ調べて" or "類似研究ある？", the planning agent can generate search queries and use the paper-search tool internally. The internal scout strengthens the initial PLANNING phase:
+### 3. review and selective retry
 
-- generates a search query from the research goal, or uses the provided query
-- searches for similar research through the configured paper provider
-- saves candidates to `papers.jsonl`
-- deduplicates papers
-- creates source-backed suggestions with paper IDs such as `[P-001]`
-- proposes primary comparison, overlap points, differentiation hypotheses, weakness points, required decisions, risks, and questions for Sora
-- evaluates a `Novelty Status`: `supported`, `unclear`, `crowded`, or `needs_human_decision`
-- blocks `/re start` when the status is `unclear`, `crowded`, or `needs_human_decision`
-- writes the result into `research_brief.md`
+The review role checks evidence, reproducibility, contradictions, failures, and unsafe operations. A structured review can request specific tasks to run again. Only those tasks are retried, up to `MAX_REVIEW_RETRIES`.
 
-Use the scout output to decide whether the research should be a reproduction, comparison, implementation prototype, new evaluation, or a narrower investigation. Do not claim novelty without a source-backed comparison; mark uncertain points as `未確認` or `要検証`.
+### 4. fresh
 
-Fake-provider results are useful for tests, but they are not treated as real literature evidence. If only fake papers are available, the novelty gate returns `needs_human_decision`.
+According to `FRESH_INTERVAL`, a fresh role adds a deliberately independent hypothesis, counterexample, missing comparison axis, or simpler alternative.
 
-## Research Ledger And Reports
+### 5. main integration
 
-The harness keeps `journal.jsonl` as the full audit log. Research decisions are also summarized in `research_ledger.jsonl`, with one row per completed research round:
+The main role integrates the latest sub results, reviews, fresh output, and optional Claude consultation. Failed or unverified results remain visible rather than being silently converted into success.
+
+More implementation detail is in `docs/multi_agent_execution.md`.
+
+## Literature Search and Novelty Gate
+
+`PAPER_PROVIDER=arxiv` uses the arXiv API. Retrieved papers are stored in `papers.jsonl` with stable IDs such as `[P-001]`.
+
+Planning can use these papers to propose:
+
+- a primary comparison
+- overlap points
+- differentiation hypotheses
+- weakness points
+- required decisions
+- risks
+- a `Novelty Status`: `supported`, `unclear`, `crowded`, or `needs_human_decision`
+
+Unclear or crowded novelty can block `/re start` through a Phase Gate. Fake-provider results are useful for tests but are not treated as real evidence.
+
+## Approval Gate Policy
+
+Any real agent can emit:
+
+```text
+APPROVAL_REQUIRED: operation=<operation>; reason=<reason>; impact=<impact>; dry_run_result=<not executed>
+```
+
+ResearchAgent scans outputs from main, every sub, review, fresh, and optional consultation. Dangerous operations are converted into an `AP-*` request and the session enters `APPROVAL_BLOCKED`.
+
+Approval is required for operations such as:
+
+- file or folder deletion
+- important-file overwrite
+- writing outside the research archive
+- `git push`, PR creation, release actions
+- external posting
+- paid API use
+- secret or `.env` transfer
+- `sudo`, `chmod`, `chown`
+- untrusted network access
+
+Long-running or large-generation operations can instead emit an important notice.
+
+Approval records permission state and resumes the harness; it does **not** automatically execute the dangerous command. This behavior is intentionally unchanged.
+
+## Research Ledger and Reports
+
+`journal.jsonl` is the full append-only audit stream. `research_ledger.jsonl` summarizes completed research rounds with fields such as:
 
 - `node_id`
 - `parent_node_id`
@@ -224,248 +309,53 @@ The harness keeps `journal.jsonl` as the full audit log. Research decisions are 
 - `evidence_ids`
 - `selected_as_best`
 
-On `/re stop`, the harness writes:
+On `/re stop`, the harness creates `artifacts/report.md` and `run_summary.md`. The report includes sources, novelty status, ledger summary, unverified claims, risks, next steps, and AI provenance.
 
-- `artifacts/report.md`
-- `run_summary.md`
+## Cost Limits
 
-The report includes sources, novelty status, ledger summary, unverified claims, risks, next steps, and AI provenance. A deterministic report review records warnings in `journal.jsonl` as `report_review_completed`.
+Existing limits remain available:
 
-If the deterministic review finds warnings, the harness creates a `review` phase gate such as `PG-2`. Experiment/SubAgent execution does not create phase gates; long-running or dangerous operations are still handled by the existing important notice and approval policies.
+- `MAX_ROUNDS`
+- `MAX_API_CALLS`
+- `MAX_TOTAL_TOKENS`
+- `MAX_AGENT_CALLS`
+- `MAX_COMMAND_SECONDS`
+- `MAX_TURNS_PER_CONVERSATION`
+- `CONVERSATION_TIMEOUT_SECONDS`
+- `CONVERGENCE_PATIENCE`
+- `REPORT_INTERVAL_SECONDS`
 
-Default MVP limits:
-
-- `MAX_ROUNDS=3`
-- `MAX_TURNS_PER_CONVERSATION=4`
-- `CONVERSATION_TIMEOUT_SECONDS=60`
-- `CONVERGENCE_PATIENCE=2`
-- `FRESH_INTERVAL=2`
-- `REPORT_INTERVAL_SECONDS=60`
-- `MAX_API_CALLS=0` means no hard API-call limit
-- `MAX_TOTAL_TOKENS=0` means no hard estimated-token limit
-- `MAX_AGENT_CALLS=0` means no hard real-agent-call limit
-- `MAX_COMMAND_SECONDS=300` limits each real sub-agent command
-- `PAPER_PROVIDER=arxiv` for normal operation; tests can keep the code default `fake`
-- `RESEARCH_ARCHIVE_DIR=research_runs` controls where new `V001.0...` research folders are created
-
-## Real Sub Agent
-
-Set:
-
-```env
-SUB_AGENT_COMMAND=codex
-```
-
-When this is set, only the `sub` role is replaced with a real CLI call. The harness runs:
-
-```text
-codex exec --cd {research_dir} --skip-git-repo-check --sandbox workspace-write --ask-for-approval never -
-```
-
-The main/review/fresh roles remain controlled by the harness. This keeps state transitions, approval gates, journal logging, and Discord reports stable while testing one real role at a time.
-
-If a real sub-agent needs a dangerous operation such as `sudo`, `chmod`, `chown`, deletion, external posting, or `git push`, it must not execute it directly. It should report one line:
-
-```text
-APPROVAL_REQUIRED: operation=sudo apt install graphviz; reason=required for figure rendering; impact=system package change; dry_run_result=not executed
-```
-
-The harness converts that line into an `AP-*` approval request and posts it to the important Discord channel. Sora can then respond from Discord with:
-
-```text
-/re approve AP-1
-/re reject AP-1 <reason>
-```
-
-In the current MVP, approval records permission state and resumes the harness loop; it does not automatically run the dangerous command. This keeps unapproved `sudo` or destructive operations from being executed by accident.
-
-## Approval Gate Policy
-
-Approval is required for:
-
-- file or folder deletion
-- overwriting important files
-- writing outside the research archive
-- `git push`, PR creation, release actions
-- external posting
-- paid API use
-- secret or `.env` transfer
-- `sudo`, `chmod`, `chown`
-- untrusted network access
-
-Allowed after important-channel notice:
-
-- long-running command candidates
-- large or many-file generation candidates
-
-These allowed operations are still reported to the important Discord channel and logged to `journal.jsonl`.
-
-## Research Archive Policy
-
-All files used by a research session should remain in that session's versioned folder. A new `/re new` creates a folder like:
-
-```text
-research_runs/V001.0_RS-abc123_research-theme/
-```
-
-The folder contains:
-
-- `state.json`
-- `journal.jsonl`
-- `research_brief.md`
-- `papers.jsonl` after literature search
-- `artifacts/` for future experiment logs, datasets, figures, diffs, and other research outputs
-
-Do not overwrite an active session with `/re new`. The harness refuses to do so unless the existing session is stopped first. Keep old folders for audit and comparison; start a new research folder for each new topic or major run.
-
-Use `/re runs` to list archived research folders.
+`MAX_AGENT_CALLS=0`, `MAX_API_CALLS=0`, and `MAX_TOTAL_TOKENS=0` mean no hard limit.
 
 ## Doctor
 
-Use `/re doctor` to check the local harness setup. It reports:
-
-- project root
-- research archive directory
-- important/log Discord channel configuration
-- paper provider
-- Codex CLI availability
-- configured `SUB_AGENT_COMMAND`
-
-## Journal
-
-`research_runs/Vxxx.0_.../journal.jsonl` is append-only NDJSON. Each line is one event JSON object. Event types include command receipt, planning questions, brief updates, research round completion, fresh output, approval requests, approval/rejection, Discord reports, errors, and session end. Each line contains the MVP schema fields from the goal prompt, including:
-
-- `timestamp`
-- `event_type`
-- `session_id`
-- `version_label`
-- `research_dir`
-- `round_id`
-- `mode`
-- `research_goal`
-- `research_brief_snapshot`
-- `conversation_sessions`
-- `sub_agent_output`
-- `review_output`
-- `claude_consultation`
-- `fresh_agent_output`
-- `approval_requests`
-- `approvals_received`
-- `files_changed`
-- `commands_run`
-- `errors`
-
-Secret-looking values are masked before writing.
-
-## Literature Search Phase A
-
-The harness now supports lightweight literature search without adding RAG or a vector database. The default provider is `FakePaperSearchProvider`, which keeps tests deterministic. A thin `ArxivPaperSearchProvider` is also available through `PAPER_PROVIDER=arxiv`; it calls the official arXiv Atom API query endpoint and parses returned metadata.
+Use:
 
 ```bash
-python main.py --workdir /tmp/research-agent-demo re search "agent evaluation citation"
-python main.py --workdir /tmp/research-agent-demo re papers
-python main.py --workdir /tmp/research-agent-demo re paper P-001
+python main.py --workdir ./runtime re doctor
 ```
 
-Papers are stored in `research_runs/Vxxx.0_.../papers.jsonl`, one JSON object per paper:
-
-- `paper_id`
-- `title`
-- `authors`
-- `year`
-- `venue`
-- `url`
-- `doi`
-- `arxiv_id`
-- `abstract`
-- `summary`
-- `source`
-- `retrieved_at`
-- `relevance_score`
-- `confidence`
-- `used_in_rounds`
-
-Search results are deduplicated by DOI, arXiv ID, then normalized title. Research notes produced from papers include citation IDs such as `[P-001]`. If a claim cannot be grounded in a paper, mark it as `未確認` or `要検証`.
-
-## Cost Management
-
-The session records:
-
-- API calls
-- estimated tokens
-- literature search count
-
-```bash
-python main.py --workdir /tmp/research-agent-demo re cost
-```
-
-When `MAX_API_CALLS` or `MAX_TOTAL_TOKENS` is greater than zero and the session reaches that limit, the harness moves to `APPROVAL_BLOCKED`, sends a cost-limit message, records the event in `journal.jsonl`, and does not continue automatically.
+It reports the project root, research archive directory, Discord channel configuration, paper provider, Codex CLI availability, and configured sub-agent command.
 
 ## Evaluation
 
-`eval/golden_questions.jsonl` contains lightweight golden questions for regression checks. Run:
+Golden questions live in:
 
-```bash
-python main.py --workdir /tmp/research-agent-demo re eval
+```text
+eval/golden_questions.jsonl
 ```
 
-The current check reports question count, paper availability, required source type hits, forbidden-claim hits, and whether citation IDs are ready.
+Run:
 
-## Restart From Journal
-
-The active root `state.json` points at the current session. If `research_runs/Vxxx.0_.../state.json` is missing but `journal.jsonl` remains, `SessionStore` can reconstruct the last known session state from the journal and make `/re resume` possible after a crash.
-
-## Research Brief
-
-`research_runs/Vxxx.0_.../research_brief.md` is the current session snapshot. It is separate from the journal: the brief is for reading the current state, while the journal is the append-only audit log.
-
-## Mock Prompts
-
-MockAgentRunner uses fixed templates for the four roles, but it can load role prompts from:
-
-- `prompts/main.md`
-- `prompts/sub.md`
-- `prompts/review.md`
-- `prompts/fresh.md`
-
-If a file is missing, the code default is used.
+```bash
+python main.py --workdir ./runtime re eval
+```
 
 ## Tests
 
 ```bash
-python -m pytest -q
+python -m compileall -q harness main.py
+pytest -q
 ```
 
-The tests cover:
-
-- `/re new -> /re plan -> /re start -> approval gate -> /re approve -> /re stop`
-- internal similar-research planning support
-- `/re start` not working before `/re new`
-- `research_brief.md` and `journal.jsonl` creation
-- fresh-agent and Claude-stub triggers
-- literature search to `papers.jsonl`, dedupe, summaries, and citation IDs
-- cost command and hard-limit blocking
-- journal-based restore
-- golden-question eval
-- bounded conversation stopping
-- pause/resume/status/redirect/idea/reject
-- Command DTO entry point shared by CLI and Discord
-- secret masking in the journal
-
-## MVP Boundaries
-
-In scope:
-
-- deterministic mock agents
-- file-based state
-- fake Discord E2E
-- dry-run approval gates
-
-Out of scope for this MVP:
-
-- real Claude/Codex/sub-agent process execution
-- parallel sessions
-- persistent database
-- production-grade auth and permissions
-- Web UI
-- automatic PRs, pushes, or releases
+GitHub Actions runs the full test suite on Python 3.11 and Python 3.12 for pull requests. The suite includes the original harness tests plus real subprocess concurrency, reviewer-driven retry, role fallback, approval propagation, workspace isolation, worker queue behavior, and Discord event-loop responsiveness.

@@ -99,9 +99,6 @@ def test_real_pipeline_parallel_review_retry_fresh_and_integration(tmp_path, mon
     command = write_fake_agent(tmp_path)
     log_path = tmp_path / "agent.log"
     monkeypatch.setenv("FAKE_AGENT_LOG", str(log_path))
-    monkeypatch.setenv("SUB_AGENT_COUNT", "2")
-    monkeypatch.setenv("AGENT_PARALLELISM", "2")
-    monkeypatch.setenv("MAX_REVIEW_RETRIES", "1")
     config = HarnessConfig(
         project_root=tmp_path,
         main_agent_command=command,
@@ -110,6 +107,10 @@ def test_real_pipeline_parallel_review_retry_fresh_and_integration(tmp_path, mon
         fresh_agent_command=command,
         fresh_interval=1,
         max_command_seconds=10,
+        sub_agent_count=2,
+        agent_parallelism=2,
+        max_review_retries=1,
+        agent_env_allowlist=("FAKE_AGENT_LOG",),
     )
     session = make_session(tmp_path)
 
@@ -145,14 +146,14 @@ def test_real_pipeline_parallel_review_retry_fresh_and_integration(tmp_path, mon
 
 def test_single_configured_command_makes_all_roles_real(tmp_path, monkeypatch):
     command = write_fake_agent(tmp_path)
-    monkeypatch.setenv("SUB_AGENT_COUNT", "2")
-    monkeypatch.setenv("AGENT_PARALLELISM", "2")
-    monkeypatch.setenv("MAX_REVIEW_RETRIES", "1")
     config = HarnessConfig(
         project_root=tmp_path,
         sub_agent_command=command,
         fresh_interval=1,
         max_command_seconds=10,
+        sub_agent_count=2,
+        agent_parallelism=2,
+        max_review_retries=1,
     )
     output = MockAgentRunner(config).run_round(make_session(tmp_path))
     stages = [item["stage"] for item in output.conversation_sessions]
@@ -167,11 +168,17 @@ def test_single_configured_command_makes_all_roles_real(tmp_path, monkeypatch):
 
 def test_approval_from_parallel_sub_is_propagated(tmp_path, monkeypatch):
     command = write_fake_agent(tmp_path)
-    monkeypatch.setenv("SUB_AGENT_COUNT", "2")
-    monkeypatch.setenv("AGENT_PARALLELISM", "2")
-    monkeypatch.setenv("MAX_REVIEW_RETRIES", "0")
     monkeypatch.setenv("FAKE_APPROVAL", "1")
-    config = HarnessConfig(project_root=tmp_path, sub_agent_command=command, fresh_interval=1, max_command_seconds=10)
+    config = HarnessConfig(
+        project_root=tmp_path,
+        sub_agent_command=command,
+        fresh_interval=1,
+        max_command_seconds=10,
+        sub_agent_count=2,
+        agent_parallelism=2,
+        max_review_retries=0,
+        agent_env_allowlist=("FAKE_APPROVAL",),
+    )
     output = MultiAgentRunner(config).run_round(make_session(tmp_path))
     assert output.proposed_operation is not None
     assert output.proposed_operation.operation == "sudo apt install graphviz"

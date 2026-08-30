@@ -49,7 +49,6 @@ def _validate_plan(
                 normalized.append(
                     {"id": task_id, "task": task, "deliverable": deliverable}
                 )
-
     if errors:
         return None, errors
     return {
@@ -145,9 +144,8 @@ def _validate_integration(
             "main_integrate.round_status must be continue|completed|blocked|failed"
         )
 
-    raw_progress = parsed.get("progress_score", 0.5)
     try:
-        progress_score = float(raw_progress)
+        progress_score = float(parsed.get("progress_score", 0.5))
     except (TypeError, ValueError):
         errors.append("main_integrate.progress_score must be numeric")
         progress_score = 0.0
@@ -244,7 +242,12 @@ def _raise_cancelled_runs(
 ) -> None:
     for run in runs:
         if run.attempts and run.latest.cancelled:
-            checkpoint.mark_status(state, "interrupted", stage=run.latest.stage, error=reason)
+            checkpoint.mark_status(
+                state,
+                "interrupted",
+                stage=run.latest.stage,
+                error=reason,
+            )
             raise AgentCancelledError(reason)
 
 
@@ -255,7 +258,12 @@ def _raise_cancelled_invocation(
     reason: str,
 ) -> None:
     if invocation.cancelled:
-        checkpoint.mark_status(state, "interrupted", stage=invocation.stage, error=reason)
+        checkpoint.mark_status(
+            state,
+            "interrupted",
+            stage=invocation.stage,
+            error=reason,
+        )
         raise AgentCancelledError(reason)
 
 
@@ -278,21 +286,22 @@ def _render_runs(runs: dict[str, SubTaskRun]) -> str:
 
 def _render_reviews(reviews: list[dict[str, object]]) -> str:
     return "\n\n".join(
-        f"review {item.get('attempt')} verdict={item.get('verdict')}\n{item.get('summary')}"
+        f"review {item.get('attempt')} verdict={item.get('verdict')}\n"
+        f"{item.get('summary')}"
         for item in reviews
     ) or "review outputなし"
 
 
 def _collect_operations(outputs: Iterable[str]) -> list[ProposedOperation]:
-    result: list[ProposedOperation] = []
+    operations: list[ProposedOperation] = []
     for output in outputs:
         for line in output.splitlines():
             stripped = line.strip()
             if stripped.startswith("APPROVAL_REQUIRED:"):
-                result.append(_parse_operation_line(stripped, approval=True))
+                operations.append(_parse_operation_line(stripped, approval=True))
             elif stripped.startswith("IMPORTANT_NOTICE:"):
-                result.append(_parse_operation_line(stripped, approval=False))
-    return _dedupe_operations(result)
+                operations.append(_parse_operation_line(stripped, approval=False))
+    return _dedupe_operations(operations)
 
 
 def _parse_operation_line(line: str, *, approval: bool) -> ProposedOperation:
@@ -315,7 +324,9 @@ def _parse_operation_line(line: str, *, approval: bool) -> ProposedOperation:
     )
 
 
-def _dedupe_operations(operations: Iterable[ProposedOperation]) -> list[ProposedOperation]:
+def _dedupe_operations(
+    operations: Iterable[ProposedOperation],
+) -> list[ProposedOperation]:
     result: list[ProposedOperation] = []
     seen: set[tuple[str, str, str, str]] = set()
     for item in operations:
@@ -337,7 +348,10 @@ def _dedupe_trace(trace: Iterable[AgentInvocation]) -> list[AgentInvocation]:
     return result
 
 
-def _restore_cost_from_checkpoint(session: ResearchSession, state: dict[str, Any]) -> None:
+def _restore_cost_from_checkpoint(
+    session: ResearchSession,
+    state: dict[str, Any],
+) -> None:
     cost = state.get("cost")
     if not isinstance(cost, dict):
         return
@@ -358,3 +372,18 @@ def _infer_round_status(decision: str) -> str:
     if any(token in normalized for token in ("fail", "失敗")):
         return "failed"
     return "continue"
+
+
+# Compatibility helpers imported by MultiAgentRunnerSupport.
+def _clip(text: str, limit: int) -> str:
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+
+
+def _safe(value: str) -> str:
+    cleaned = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in value
+    )
+    return cleaned.strip("-")[:64] or "task"

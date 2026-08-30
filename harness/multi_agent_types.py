@@ -1,22 +1,19 @@
 from __future__ import annotations
 
-import json
 import os
-import shlex
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from harness.approval import ProposedOperation
-from harness.artifacts import ArtifactRecord, build_artifact_manifest, promote_selected_artifacts
-from harness.checkpoint import RoundCheckpointStore
+from harness.artifacts import ArtifactRecord, build_artifact_manifest
 from harness.config import HarnessConfig
 from harness.cost import estimate_tokens
-from harness.process_manager import AgentCancelledError, ProcessCancellationController, build_agent_environment
+from harness.process_manager import ProcessCancellationController, build_agent_environment
+from harness.sandbox import SandboxUnavailableError, build_agent_command
 from harness.state import ResearchSession
 
 
@@ -36,6 +33,8 @@ class AgentInvocation:
     workspace: str | None = None
     artifacts: tuple[ArtifactRecord, ...] = ()
     artifact_warnings: tuple[str, ...] = ()
+    estimated_input_tokens: int = 0
+    estimated_output_tokens: int = 0
 
     @property
     def ok(self) -> bool:
@@ -57,6 +56,8 @@ class AgentInvocation:
             "workspace": self.workspace,
             "artifacts": [item.to_dict() for item in self.artifacts],
             "artifact_warnings": list(self.artifact_warnings),
+            "estimated_input_tokens": self.estimated_input_tokens,
+            "estimated_output_tokens": self.estimated_output_tokens,
         }
 
     @classmethod
@@ -80,6 +81,8 @@ class AgentInvocation:
                 if isinstance(item, dict)
             ),
             artifact_warnings=tuple(str(item) for item in data.get("artifact_warnings", [])),
+            estimated_input_tokens=int(data.get("estimated_input_tokens") or 0),
+            estimated_output_tokens=int(data.get("estimated_output_tokens") or 0),
         )
 
 
@@ -143,6 +146,11 @@ class RealRoundOutput:
     proposed_operations: list[ProposedOperation] = field(default_factory=list)
     promoted_artifacts: list[dict[str, object]] = field(default_factory=list)
     protocol_errors: list[str] = field(default_factory=list)
+    round_status: str = "continue"
+    progress_score: float = 0.5
+    new_evidence_ids: list[str] = field(default_factory=list)
+    unresolved_blockers: list[str] = field(default_factory=list)
+    round_number: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -162,6 +170,11 @@ class RealRoundOutput:
             "next_action": self.next_action,
             "promoted_artifacts": self.promoted_artifacts,
             "protocol_errors": self.protocol_errors,
+            "round_status": self.round_status,
+            "progress_score": self.progress_score,
+            "new_evidence_ids": self.new_evidence_ids,
+            "unresolved_blockers": self.unresolved_blockers,
+            "round_number": self.round_number,
         }
 
     @classmethod
@@ -180,9 +193,21 @@ class RealRoundOutput:
             subtask=str(data.get("subtask") or ""),
             sub_agent_output=str(data.get("sub_agent_output") or ""),
             review_output=str(data.get("review_output") or ""),
-            claude_consultation=str(data["claude_consultation"]) if data.get("claude_consultation") is not None else None,
-            fresh_agent_output=str(data["fresh_agent_output"]) if data.get("fresh_agent_output") is not None else None,
-            conversation_sessions=[dict(item) for item in data.get("conversation_sessions", []) if isinstance(item, dict)],
+            claude_consultation=(
+                str(data["claude_consultation"])
+                if data.get("claude_consultation") is not None
+                else None
+            ),
+            fresh_agent_output=(
+                str(data["fresh_agent_output"])
+                if data.get("fresh_agent_output") is not None
+                else None
+            ),
+            conversation_sessions=[
+                dict(item)
+                for item in data.get("conversation_sessions", [])
+                if isinstance(item, dict)
+            ],
             proposed_operation=first or (operations[0] if operations else None),
             proposed_operations=operations,
             accepted_ideas=_string_list(data.get("accepted_ideas")),
@@ -190,8 +215,17 @@ class RealRoundOutput:
             decision=str(data.get("decision") or "blocked"),
             confidence=_confidence(data.get("confidence")),
             next_action=str(data.get("next_action") or "人間確認"),
-            promoted_artifacts=[dict(item) for item in data.get("promoted_artifacts", []) if isinstance(item, dict)],
+            promoted_artifacts=[
+                dict(item)
+                for item in data.get("promoted_artifacts", [])
+                if isinstance(item, dict)
+            ],
             protocol_errors=_string_list(data.get("protocol_errors")),
+            round_status=_round_status(data.get("round_status")),
+            progress_score=_progress_score(data.get("progress_score")),
+            new_evidence_ids=_string_list(data.get("new_evidence_ids")),
+            unresolved_blockers=_string_list(data.get("unresolved_blockers")),
+            round_number=int(data.get("round_number") or 0),
         )
 
 
@@ -219,29 +253,36 @@ class AgentCommandExecutor:
         working_dir: Path | None = None,
     ) -> AgentInvocation:
         started = time.monotonic()
+        input_tokens = estimate_tokens(prompt)
         if self.cancellation.cancelled:
             return AgentInvocation(
-                role, stage, task_id, (), f"Agent cancelled before launch: {self.cancellation.reason}", "", 130, 0.0,
+                role=role,
+                stage=stage,
+                task_id=task_id,
+                command=(),
+                output=f"Agent cancelled before launch: {self.cancellation.reason}",
+                stderr="",
+                returncode=130,
+                duration_seconds=0.0,
                 cancelled=True,
+                estimated_input_tokens=input_tokens,
             )
         if not command_text:
             return AgentInvocation(
-                role, stage, task_id, (), f"Real {role} agent skipped: command not configured.", "", 127, 0.0,
+                role=role,
+                stage=stage,
+                task_id=task_id,
+                command=(),
+                output=f"Real {role} agent skipped: command not configured.",
+                stderr="",
+                returncode=127,
+                duration_seconds=0.0,
                 skipped=True,
+                estimated_input_tokens=input_tokens,
             )
-        with self.lock:
-            if self.config.max_agent_calls > 0 and session.cost.agent_calls >= self.config.max_agent_calls:
-                return AgentInvocation(
-                    role, stage, task_id, (), "Real agent skipped: MAX_AGENT_CALLS reached.", "", 125, 0.0,
-                    skipped=True,
-                )
-            session.cost.agent_calls += 1
-            session.cost.estimated_tokens += estimate_tokens(prompt)
 
         cwd = working_dir or Path(session.research_dir or self.config.project_root)
         cwd.mkdir(parents=True, exist_ok=True)
-        command = self._build_command(command_text, sandbox, cwd)
-        redacted = tuple(_redact(command))
         environment = build_agent_environment(
             self.config,
             session,
@@ -250,6 +291,49 @@ class AgentCommandExecutor:
             task_id=task_id,
             working_dir=cwd,
         )
+        try:
+            command = build_agent_command(
+                self.config,
+                command_text=command_text,
+                sandbox_mode=sandbox,
+                working_dir=cwd,
+                research_root=Path(session.research_dir or self.config.project_root),
+                environment=environment,
+            )
+        except (SandboxUnavailableError, ValueError, OSError) as exc:
+            return AgentInvocation(
+                role=role,
+                stage=stage,
+                task_id=task_id,
+                command=(),
+                output=f"Agent sandbox setup failed: {exc}",
+                stderr=str(exc),
+                returncode=126,
+                duration_seconds=time.monotonic() - started,
+                skipped=True,
+                workspace=str(cwd),
+                estimated_input_tokens=input_tokens,
+            )
+
+        with self.lock:
+            if self.config.max_agent_calls > 0 and session.cost.agent_calls >= self.config.max_agent_calls:
+                return AgentInvocation(
+                    role=role,
+                    stage=stage,
+                    task_id=task_id,
+                    command=tuple(_redact(command)),
+                    output="Real agent skipped: MAX_AGENT_CALLS reached.",
+                    stderr="",
+                    returncode=125,
+                    duration_seconds=time.monotonic() - started,
+                    skipped=True,
+                    workspace=str(cwd),
+                    estimated_input_tokens=input_tokens,
+                )
+            session.cost.agent_calls += 1
+            session.cost.estimated_tokens += input_tokens
+
+        redacted = tuple(_redact(command))
         process: subprocess.Popen[str] | None = None
         output = ""
         stderr = ""
@@ -266,7 +350,9 @@ class AgentCommandExecutor:
                 cwd=cwd,
                 env=environment,
                 start_new_session=os.name != "nt",
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
             )
             if not self.cancellation.register(process):
                 self.cancellation.terminate_one(process)
@@ -275,7 +361,10 @@ class AgentCommandExecutor:
                 returncode = 130
             else:
                 try:
-                    output, stderr = process.communicate(input=prompt, timeout=self.config.max_command_seconds)
+                    output, stderr = process.communicate(
+                        input=prompt,
+                        timeout=self.config.max_command_seconds,
+                    )
                 except subprocess.TimeoutExpired:
                     timed_out = True
                     self.cancellation.terminate_one(process)
@@ -298,10 +387,14 @@ class AgentCommandExecutor:
             output = output or f"Real {role} agent timeout after {self.config.max_command_seconds}s."
             returncode = 124
         elif returncode and not output:
-            output = f"Real {role} agent failed: returncode={returncode}; stderr={stderr[-2000:] or 'なし'}"
+            output = (
+                f"Real {role} agent failed: returncode={returncode}; "
+                f"stderr={stderr[-2000:] or 'なし'}"
+            )
         elif not returncode and not output:
             output = "Real agent completed without output. 結果は未確認。"
 
+        output_tokens = estimate_tokens(output) + estimate_tokens(stderr)
         artifacts: list[ArtifactRecord] = []
         artifact_warnings: list[str] = []
         if sandbox == "workspace-write":
@@ -311,7 +404,8 @@ class AgentCommandExecutor:
                 max_bytes=self.config.artifact_max_bytes,
             )
         with self.lock:
-            session.cost.estimated_tokens += estimate_tokens(output) + estimate_tokens(stderr)
+            session.cost.estimated_tokens += output_tokens
+
         return AgentInvocation(
             role=role,
             stage=stage,
@@ -326,19 +420,9 @@ class AgentCommandExecutor:
             workspace=str(cwd),
             artifacts=tuple(artifacts),
             artifact_warnings=tuple(artifact_warnings),
+            estimated_input_tokens=input_tokens,
+            estimated_output_tokens=output_tokens,
         )
-
-    def _build_command(self, command_text: str, sandbox: str, cwd: Path) -> list[str]:
-        parts = shlex.split(command_text)
-        if not parts:
-            raise ValueError("agent command is empty")
-        if Path(parts[0]).name == "codex" and len(parts) == 1:
-            return [
-                parts[0], "exec", "--cd", str(cwd), "--skip-git-repo-check",
-                "--sandbox", sandbox, "--ask-for-approval", "never", "-",
-            ]
-        return parts
-
 
 
 def _clip(text: str, limit: int) -> str:
@@ -392,3 +476,16 @@ def _string_list(value: object) -> list[str]:
 def _confidence(value: object) -> str:
     normalized = str(value or "mid").lower()
     return normalized if normalized in {"low", "mid", "high"} else "mid"
+
+
+def _round_status(value: object) -> str:
+    normalized = str(value or "continue").lower()
+    return normalized if normalized in {"continue", "completed", "blocked", "failed"} else "continue"
+
+
+def _progress_score(value: object) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+    return min(1.0, max(0.0, score))

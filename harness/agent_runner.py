@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import shlex
-import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from harness.approval import ProposedOperation
 from harness.config import HarnessConfig
 from harness.conversation import ConversationSession
-from harness.process_manager import build_agent_environment
+from harness.multi_agent_types import AgentCommandExecutor
+from harness.process_manager import ProcessCancellationController
 from harness.state import ResearchSession
 
 
@@ -77,11 +78,19 @@ class MockAgentRunner:
             ]
         )
         fresh = None
-        if self.config.fresh_interval > 0 and round_number % self.config.fresh_interval == 0:
-            fresh = f"Fresh stub: {self.prompts['fresh']} 実エージェント接続前に失敗時再開シナリオを試す。"
+        if (
+            self.config.fresh_interval > 0
+            and round_number % self.config.fresh_interval == 0
+        ):
+            fresh = (
+                f"Fresh stub: {self.prompts['fresh']} "
+                "実エージェント接続前に失敗時再開シナリオを試す。"
+            )
         claude = None
         if round_number == 1:
-            claude = "Claude stub: 重要判断ではPLANNING承認と承認ゲートを分離する。"
+            claude = (
+                "Claude stub: 重要判断ではPLANNING承認と承認ゲートを分離する。"
+            )
         proposed_operation = None
         if round_number == 1:
             proposed_operation = ProposedOperation(
@@ -91,21 +100,36 @@ class MockAgentRunner:
                 dry_run_result="危険操作として検出。@Sora の /re approve が来るまで停止する。",
             )
         subtask = f"Mock sub-agent: {self.prompts['sub']}"
-        sub_agent_output = "Mock sub-agent output: 変更diffなし。E2E観点は満たせる見込み。"
+        sub_agent_output = (
+            "Mock sub-agent output: 変更diffなし。E2E観点は満たせる見込み。"
+        )
         return RoundOutput(
-            main_agent_summary=f"{self.prompts['main']} {current_question} を分解し、MVP配線の進捗を統合した。",
+            main_agent_summary=(
+                f"{self.prompts['main']} {current_question} を分解し、"
+                "MVP配線の進捗を統合した。"
+            ),
             subtask=subtask,
             sub_agent_output=sub_agent_output,
-            review_output=f"Review stub: {self.prompts['review']} /re start前にRESEARCHへ進まないこと、承認なし危険操作を止めることを確認。",
+            review_output=(
+                f"Review stub: {self.prompts['review']} "
+                "/re start前にRESEARCHへ進まないこと、"
+                "承認なし危険操作を止めることを確認。"
+            ),
             claude_consultation=claude,
             fresh_agent_output=fresh,
             conversation_sessions=[conversation.to_journal_dict()],
             proposed_operation=proposed_operation,
-            accepted_ideas=[f"R{round_number}: MockAgentRunnerで検証可能な最小ループを維持"],
+            accepted_ideas=[
+                f"R{round_number}: MockAgentRunnerで検証可能な最小ループを維持"
+            ],
             rejected_ideas=[],
             decision="採用: MVP範囲内で次のラウンドへ進める",
             confidence="mid" if round_number == 1 else "high",
-            next_action="承認待ちを解消する" if proposed_operation else "次の研究ラウンドへ進む",
+            next_action=(
+                "承認待ちを解消する"
+                if proposed_operation
+                else "次の研究ラウンドへ進む"
+            ),
         )
 
     def cancel_active(self, reason: str = "cancel requested") -> int:
@@ -122,77 +146,94 @@ class MockAgentRunner:
         for role in prompts:
             path = prompt_dir / f"{role}.md"
             if path.exists():
-                prompts[role] = path.read_text(encoding="utf-8").strip() or prompts[role]
+                prompts[role] = (
+                    path.read_text(encoding="utf-8").strip() or prompts[role]
+                )
         return prompts
 
 
 class SubAgentCommandRunner:
-    """Backward-compatible direct sub-agent command runner."""
+    """Backward-compatible direct runner using the same hardened executor."""
 
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
+        self.cancellation = ProcessCancellationController(
+            config.agent_cancel_grace_seconds
+        )
+        self.executor = AgentCommandExecutor(
+            config,
+            threading.RLock(),
+            self.cancellation,
+        )
 
-    def run(self, session: ResearchSession, round_number: int, task: str) -> str:
-        if self.config.max_agent_calls > 0 and session.cost.agent_calls >= self.config.max_agent_calls:
-            return "Real sub-agent skipped: MAX_AGENT_CALLS reached. 続行するには設定変更または承認が必要。"
-        session.cost.agent_calls += 1
-        command = self._build_command(session)
-        prompt = self._build_prompt(session, round_number, task)
-        cwd = Path(session.research_dir or self.config.project_root)
-        cwd.mkdir(parents=True, exist_ok=True)
-        environment = build_agent_environment(
-            self.config,
-            session,
+    def run(
+        self,
+        session: ResearchSession,
+        round_number: int,
+        task: str,
+    ) -> str:
+        root = Path(session.research_dir or self.config.project_root)
+        workspace = (
+            root
+            / "artifacts"
+            / "agent_workspaces"
+            / f"R{round_number:03d}"
+            / "legacy-sub"
+            / "attempt-01"
+        )
+        workspace.mkdir(parents=True, exist_ok=True)
+        invocation = self.executor.run(
+            session=session,
             role="sub",
             stage="legacy_sub_execute",
-            task_id=None,
-            working_dir=cwd,
+            task_id="legacy-sub",
+            prompt=self._build_prompt(session, round_number, task),
+            command_text=self.config.sub_agent_command,
+            sandbox="workspace-write",
+            working_dir=workspace,
         )
-        try:
-            completed = subprocess.run(
-                command,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=self.config.max_command_seconds,
-                cwd=cwd,
-                env=environment,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return (
-                "Real sub-agent timeout: "
-                f"{self.config.sub_agent_command} exceeded {self.config.max_command_seconds}s. 結果は未確認。"
-            )
-        stdout = completed.stdout.strip()
-        stderr = completed.stderr.strip()
-        if completed.returncode != 0:
-            return (
-                f"Real sub-agent failed: returncode={completed.returncode}. "
-                f"stdout={stdout[-1200:] or 'なし'} stderr={stderr[-1200:] or 'なし'}"
-            )
-        return stdout or "Real sub-agent completed without output. 結果は未確認。"
+        return invocation.output
+
+    def cancel_active(self, reason: str = "legacy sub cancellation") -> int:
+        return self.cancellation.cancel(reason)
+
+    def reset_cancellation(self) -> None:
+        self.cancellation.reset()
 
     def _build_command(self, session: ResearchSession) -> list[str]:
+        """Compatibility preview used by existing callers and tests."""
         assert self.config.sub_agent_command is not None
         parts = shlex.split(self.config.sub_agent_command)
         executable = Path(parts[0]).name if parts else ""
         if executable == "codex" and len(parts) == 1:
             return [
-                parts[0], "exec", "--cd", session.research_dir or str(self.config.project_root),
-                "--skip-git-repo-check", "--sandbox", "workspace-write",
-                "--ask-for-approval", "never", "-",
+                parts[0],
+                "exec",
+                "--cd",
+                session.research_dir or str(self.config.project_root),
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "never",
+                "-",
             ]
         return parts
 
-    def _build_prompt(self, session: ResearchSession, round_number: int, task: str) -> str:
+    def _build_prompt(
+        self,
+        session: ResearchSession,
+        round_number: int,
+        task: str,
+    ) -> str:
         return f"""あなたは研究ハーネスのsubエージェントです。
 単一タスクだけを実行し、結果を構造化して返してください。
 
 制約:
-- 作業場所は研究フォルダ内に限定する: {session.research_dir}
+- 作業場所は割り当てられた専用workspace内に限定する
+- 共有研究フォルダは参照用とし、直接変更しない
 - ファイル削除、外部投稿、git push、秘密情報送信は禁止
-- sudo/chmod/chown、ファイル削除、外部投稿、git push、秘密情報送信、課金API呼び出しは禁止
+- sudo/chmod/chown、課金API呼び出しは禁止
 - 危険操作が必要なら実行せず、次の形式で1行だけ報告する:
   APPROVAL_REQUIRED: operation=<操作>; reason=<理由>; impact=<影響>; dry_run_result=<実行していない確認結果>
 - 大量ファイル生成や長時間コマンドが必要なら、その必要性を報告だけして実行しない
@@ -229,6 +270,9 @@ def parse_approval_required(text: str) -> ProposedOperation | None:
             operation=operation,
             reason=parts.get("reason", "SubAgentが承認必要操作を報告した。"),
             impact=parts.get("impact", "影響は未確認。MVPでは実行しない。"),
-            dry_run_result=parts.get("dry_run_result", "未実行。Discord承認待ちに変換した。"),
+            dry_run_result=parts.get(
+                "dry_run_result",
+                "未実行。Discord承認待ちに変換した。",
+            ),
         )
     return None

@@ -10,14 +10,20 @@ def _int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw == "":
         return default
-    return int(raw)
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def _float_env(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
         return default
-    return float(raw)
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -29,7 +35,9 @@ def _bool_env(name: str, default: bool) -> bool:
 
 def _csv_env(name: str) -> tuple[str, ...]:
     raw = os.getenv(name, "")
-    return tuple(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
+    return tuple(
+        dict.fromkeys(item.strip() for item in raw.split(",") if item.strip())
+    )
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,9 @@ class HarnessConfig:
     max_rounds: int = 3
     fresh_interval: int = 2
     convergence_patience: int = 2
+    convergence_no_evidence_patience: int = 2
+    convergence_min_progress: float = 0.05
+    convergence_require_high_confidence: bool = True
     report_interval_seconds: int = 60
     max_turns_per_conversation: int = 4
     conversation_timeout_seconds: int = 60
@@ -73,6 +84,12 @@ class HarnessConfig:
     artifact_max_files: int = 500
     artifact_max_bytes: int = 100 * 1024 * 1024
 
+    # Direct construction preserves test/dev compatibility. from_env uses
+    # secure production defaults for generic commands.
+    agent_sandbox_backend: str = "none"
+    agent_allow_unsandboxed_generic: bool = True
+    agent_network_policy: str = "deny"
+
     # Discord worker.
     discord_worker_queue_size: int = 32
 
@@ -86,13 +103,24 @@ class HarnessConfig:
         env_file = root / ".env"
         if env_file.exists():
             _load_dotenv(env_file)
+
         archive_raw = research_archive_dir or os.getenv("RESEARCH_ARCHIVE_DIR", "research_runs")
         archive_path = Path(archive_raw).expanduser()
         if not archive_path.is_absolute():
             archive_path = root / archive_path
+
         home_mode = os.getenv("AGENT_HOME_MODE", "isolated").strip().lower()
         if home_mode not in {"isolated", "preserve"}:
             home_mode = "isolated"
+
+        sandbox_backend = os.getenv("AGENT_SANDBOX_BACKEND", "auto").strip().lower()
+        if sandbox_backend not in {"auto", "bwrap", "none"}:
+            sandbox_backend = "auto"
+
+        network_policy = os.getenv("AGENT_NETWORK_POLICY", "deny").strip().lower()
+        if network_policy not in {"deny", "allow"}:
+            network_policy = "deny"
+
         return cls(
             project_root=root,
             discord_bot_token=os.getenv("DISCORD_BOT_TOKEN") or None,
@@ -109,16 +137,29 @@ class HarnessConfig:
             review_agent_command=os.getenv("REVIEW_AGENT_COMMAND") or None,
             fresh_agent_command=os.getenv("FRESH_AGENT_COMMAND") or None,
             claude_agent_command=os.getenv("CLAUDE_AGENT_COMMAND") or None,
-            max_rounds=_int_env("MAX_ROUNDS", 3),
-            fresh_interval=_int_env("FRESH_INTERVAL", 2),
-            convergence_patience=_int_env("CONVERGENCE_PATIENCE", 2),
-            report_interval_seconds=_int_env("REPORT_INTERVAL_SECONDS", 60),
-            max_turns_per_conversation=_int_env("MAX_TURNS_PER_CONVERSATION", 4),
-            conversation_timeout_seconds=_int_env("CONVERSATION_TIMEOUT_SECONDS", 60),
-            max_api_calls=_int_env("MAX_API_CALLS", 0),
-            max_total_tokens=_int_env("MAX_TOTAL_TOKENS", 0),
-            max_agent_calls=_int_env("MAX_AGENT_CALLS", 0),
-            max_command_seconds=_int_env("MAX_COMMAND_SECONDS", 300),
+            max_rounds=max(1, _int_env("MAX_ROUNDS", 3)),
+            fresh_interval=max(0, _int_env("FRESH_INTERVAL", 2)),
+            convergence_patience=max(0, _int_env("CONVERGENCE_PATIENCE", 2)),
+            convergence_no_evidence_patience=max(
+                0, _int_env("CONVERGENCE_NO_EVIDENCE_PATIENCE", 2)
+            ),
+            convergence_min_progress=min(
+                1.0, max(0.0, _float_env("CONVERGENCE_MIN_PROGRESS", 0.05))
+            ),
+            convergence_require_high_confidence=_bool_env(
+                "CONVERGENCE_REQUIRE_HIGH_CONFIDENCE", True
+            ),
+            report_interval_seconds=max(1, _int_env("REPORT_INTERVAL_SECONDS", 60)),
+            max_turns_per_conversation=max(
+                1, _int_env("MAX_TURNS_PER_CONVERSATION", 4)
+            ),
+            conversation_timeout_seconds=max(
+                1, _int_env("CONVERSATION_TIMEOUT_SECONDS", 60)
+            ),
+            max_api_calls=max(0, _int_env("MAX_API_CALLS", 0)),
+            max_total_tokens=max(0, _int_env("MAX_TOTAL_TOKENS", 0)),
+            max_agent_calls=max(0, _int_env("MAX_AGENT_CALLS", 0)),
+            max_command_seconds=max(1, _int_env("MAX_COMMAND_SECONDS", 300)),
             paper_provider=os.getenv("PAPER_PROVIDER", "fake"),
             research_archive_dir=archive_path,
             sub_agent_count=max(1, _int_env("SUB_AGENT_COUNT", 3)),
@@ -128,12 +169,23 @@ class HarnessConfig:
             agent_output_char_limit=max(0, _int_env("AGENT_OUTPUT_CHAR_LIMIT", 12000)),
             agent_env_allowlist=_csv_env("AGENT_ENV_ALLOWLIST"),
             agent_home_mode=home_mode,
-            agent_cancel_grace_seconds=max(0.1, _float_env("AGENT_CANCEL_GRACE_SECONDS", 3.0)),
+            agent_cancel_grace_seconds=max(
+                0.1, _float_env("AGENT_CANCEL_GRACE_SECONDS", 3.0)
+            ),
             checkpoint_enabled=_bool_env("CHECKPOINT_ENABLED", True),
             artifact_promotion_enabled=_bool_env("ARTIFACT_PROMOTION_ENABLED", True),
             artifact_max_files=max(1, _int_env("ARTIFACT_MAX_FILES", 500)),
-            artifact_max_bytes=max(1, _int_env("ARTIFACT_MAX_BYTES", 100 * 1024 * 1024)),
-            discord_worker_queue_size=max(1, _int_env("DISCORD_WORKER_QUEUE_SIZE", 32)),
+            artifact_max_bytes=max(
+                1, _int_env("ARTIFACT_MAX_BYTES", 100 * 1024 * 1024)
+            ),
+            agent_sandbox_backend=sandbox_backend,
+            agent_allow_unsandboxed_generic=_bool_env(
+                "AGENT_ALLOW_UNSANDBOXED_GENERIC", False
+            ),
+            agent_network_policy=network_policy,
+            discord_worker_queue_size=max(
+                1, _int_env("DISCORD_WORKER_QUEUE_SIZE", 32)
+            ),
         )
 
     @property

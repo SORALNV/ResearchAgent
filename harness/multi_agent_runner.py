@@ -312,7 +312,7 @@ class MultiAgentRunner:
                     role="sub",
                     stage=stage,
                     task_id=task.task_id,
-                    prompt=self._sub_prompt(session, round_number, task, workspace, previous.latest.output if previous else None, (instructions or {}).get(task.task_id)),
+                    prompt=self._sub_prompt(session, round_number, task, stage, workspace, previous.latest.output if previous else None, (instructions or {}).get(task.task_id)),
                     command_text=self._command_for("sub"),
                     sandbox="workspace-write",
                     working_dir=workspace,
@@ -356,8 +356,8 @@ class MultiAgentRunner:
     def _plan_prompt(self, session: ResearchSession, round_number: int) -> str:
         return f'''STAGE: main_plan\nROLE: main\nROUND: {round_number}\nGOAL: {session.research_goal}\nCURRENT_QUESTION: {session.current_question or "未設定"}\n\n研究ゴールを最大{self.sub_count}個の相互依存を最小化したsubタスクへ分解してください。証拠収集、実装・実験、反証・リスク監査など異なる観点にしてください。\nJSONのみ: {{"summary":"...","subtasks":[{{"id":"S1","task":"...","deliverable":"..."}}],"confidence":"low|mid|high"}}'''
 
-    def _sub_prompt(self, session: ResearchSession, round_number: int, task: SubTask, workspace: Path, previous: str | None, instruction: str | None) -> str:
-        return f'''STAGE: sub_retry\nROLE: sub\nROUND: {round_number}\nTASK_ID: {task.task_id}\nGOAL: {session.research_goal}\nTASK: {task.task}\nDELIVERABLE: {task.deliverable}\nREVISION_INSTRUCTION: {instruction or "なし"}\nPRIOR_OUTPUT: {previous or "なし"}\n\nこのタスクだけを実行してください。このsub専用workspaceにのみ書き込む: {workspace}\n共有研究フォルダは参照用: {session.research_dir}\n他subのworkspaceへ書き込まない。ファイル削除、外部投稿、git push、秘密情報送信、課金API、sudo/chmod/chownは禁止。危険操作が必要なら実行せず1行で: APPROVAL_REQUIRED: operation=<操作>; reason=<理由>; impact=<影響>; dry_run_result=<未実行結果>\n長時間・大量生成が必要なら: IMPORTANT_NOTICE: operation=long_running_command:<操作>; reason=<理由>; impact=<影響>; dry_run_result=<未実行結果>\n結果、根拠、コマンド、変更ファイル、失敗、未確認事項、次の提案を返してください。'''
+    def _sub_prompt(self, session: ResearchSession, round_number: int, task: SubTask, stage: str, workspace: Path, previous: str | None, instruction: str | None) -> str:
+        return f'''STAGE: {stage}\nROLE: sub\nROUND: {round_number}\nTASK_ID: {task.task_id}\nGOAL: {session.research_goal}\nTASK: {task.task}\nDELIVERABLE: {task.deliverable}\nREVISION_INSTRUCTION: {instruction or "なし"}\nPRIOR_OUTPUT: {previous or "なし"}\n\nこのタスクだけを実行してください。このsub専用workspaceにのみ書き込む: {workspace}\n共有研究フォルダは参照用: {session.research_dir}\n他subのworkspaceへ書き込まない。ファイル削除、外部投稿、git push、秘密情報送信、課金API、sudo/chmod/chownは禁止。危険操作が必要なら実行せず1行で: APPROVAL_REQUIRED: operation=<操作>; reason=<理由>; impact=<影響>; dry_run_result=<未実行結果>\n長時間・大量生成が必要なら: IMPORTANT_NOTICE: operation=long_running_command:<操作>; reason=<理由>; impact=<影響>; dry_run_result=<未実行結果>\n結果、根拠、コマンド、変更ファイル、失敗、未確認事項、次の提案を返してください。'''
 
     def _review_prompt(self, session: ResearchSession, round_number: int, plan: dict[str, object], runs: dict[str, SubTaskRun], attempt: int) -> str:
         return f'''STAGE: review\nROLE: review\nROUND: {round_number}\nREVIEW_ATTEMPT: {attempt}\nGOAL: {session.research_goal}\nPLAN: {json.dumps(plan, ensure_ascii=False)}\nSUB_OUTPUTS:\n{_render_runs(runs)}\n\n根拠、再現性、相互矛盾、未確認事項、安全性を批判的に確認してください。修正が必要なら対象TASK_IDと具体的再実行指示を返してください。\nJSONのみ: {{"verdict":"accept|revise","summary":"...","revisions":[{{"task_id":"S1","instructions":"..."}}],"confidence":"low|mid|high"}}'''

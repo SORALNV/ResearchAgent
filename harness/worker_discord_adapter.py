@@ -8,7 +8,7 @@ from harness.worker import AsyncCommandWorker, WorkerQueueFullError
 
 
 class WorkerDiscordBotAdapter:
-    """discord.py adapter with an off-loop worker and an immediate cancellation control lane."""
+    """Discord adapter with a serialized worker and immediate control/read lane."""
 
     def __init__(
         self,
@@ -31,7 +31,9 @@ class WorkerDiscordBotAdapter:
             import discord
             from discord import app_commands
         except ImportError as exc:
-            raise RuntimeError("Install with `pip install -e .[discord]` to run the real bot.") from exc
+            raise RuntimeError(
+                "Install with `pip install -e .[discord]` to run the real bot."
+            ) from exc
 
         intents = discord.Intents.default()
         intents.message_content = True
@@ -62,6 +64,7 @@ class WorkerDiscordBotAdapter:
             orchestrator = self.orchestrator_factory()
             orchestrator.discord = output_adapter
         orchestrator_box["orchestrator"] = orchestrator
+
         worker = AsyncCommandWorker(
             orchestrator.handle,
             max_queue_size=self.worker_queue_size,
@@ -96,12 +99,7 @@ class WorkerDiscordBotAdapter:
             cancel = getattr(orchestrator, "cancel_active", None)
             return int(cancel(reason)) if callable(cancel) else 0
 
-        async def handle(interaction: discord.Interaction, command: Command) -> None:
-            await interaction.response.defer(thinking=True)
-            if command.name in {"pause", "stop"}:
-                await asyncio.to_thread(cancel_active, f"Discord /re {command.name}")
-            if command.name == "stop":
-                await sync_presence("finalizing")
+        async def submit(interaction: discord.Interaction, command: Command) -> None:
             try:
                 result = await worker.submit(command, _context(interaction))
             except WorkerQueueFullError:
@@ -117,25 +115,48 @@ class WorkerDiscordBotAdapter:
             await reply(interaction, result.message)
             await sync_presence()
 
+        async def handle(interaction: discord.Interaction, command: Command) -> None:
+            await interaction.response.defer(thinking=True)
+
+            # Read-only status bypasses the serialized mutation queue. It remains
+            # responsive while a long-running research command owns the worker.
+            if command.name == "status":
+                try:
+                    message = await asyncio.to_thread(orchestrator.status)
+                except Exception as exc:
+                    message = f"ResearchAgent status error: {exc}"
+                await reply(interaction, message)
+                await sync_presence()
+                return
+
+            if command.name in {"pause", "stop"}:
+                await asyncio.to_thread(
+                    cancel_active,
+                    f"Discord /re {command.name}",
+                )
+            if command.name == "stop":
+                await sync_presence("finalizing")
+            await submit(interaction, command)
+
         re = app_commands.Group(name="re", description="研究モード操作")
 
-        @re.command(name="new", description="前テーマを終了し、新しい研究対話モードを準備します。")
+        @re.command(name="new", description="前テーマを終了し、新しい研究対話を準備します。")
         async def re_new(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("new_session"))
 
-        @re.command(name="plan", description="planモードに切り替え、通常メッセージで壁打ちを開始します。")
+        @re.command(name="plan", description="planモードで通常メッセージの壁打ちを開始します。")
         async def re_plan(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("enter_plan"))
 
-        @re.command(name="start", description="PLANNINGを承認し、RESEARCHを開始します。")
+        @re.command(name="start", description="PLANNINGを承認しRESEARCHを開始します。")
         async def re_start(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("start"))
 
-        @re.command(name="status", description="現在の研究セッション状態を表示します。")
+        @re.command(name="status", description="実行ステージ、Agent数、checkpointを表示します。")
         async def re_status(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("status"))
 
-        @re.command(name="pause", description="実行中Agentを停止し、研究セッションを一時停止します。")
+        @re.command(name="pause", description="実行中Agentを停止しセッションを一時停止します。")
         async def re_pause(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("pause"))
 
@@ -143,58 +164,89 @@ class WorkerDiscordBotAdapter:
         async def re_resume(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("resume"))
 
-        @re.command(name="cancel", description="実行中Agentプロセスだけを直ちに停止します。")
+        @re.command(name="cancel", description="実行中Agentを直ちに停止しPAUSEDへ移行します。")
         async def re_cancel(interaction: discord.Interaction) -> None:
             await interaction.response.defer(thinking=True)
             count = await asyncio.to_thread(cancel_active, "Discord /re cancel")
-            await reply(interaction, f"実行中Agentへ停止要求を送りました。対象プロセス: {count}")
+            try:
+                result = await worker.submit(Command("pause"), _context(interaction))
+                detail = result.message
+            except Exception as exc:
+                detail = f"pause transition error: {exc}"
+            await reply(
+                interaction,
+                f"実行中Agentへ停止要求を送りました。対象プロセス: {count}\n{detail}",
+            )
             await sync_presence()
 
         @re.command(name="search", description="指定queryで既存研究を検索します。")
         async def re_search(interaction: discord.Interaction, query: str) -> None:
             await handle(interaction, Command("search", {"query": query}))
 
-        @re.command(name="papers", description="取得済み文献の一覧を表示します。")
+        @re.command(name="papers", description="取得済み文献を一覧表示します。")
         async def re_papers(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("papers"))
 
-        @re.command(name="paper", description="指定した文献IDの詳細を表示します。")
+        @re.command(name="paper", description="指定文献IDの詳細を表示します。")
         async def re_paper(interaction: discord.Interaction, paper_id: str) -> None:
             await handle(interaction, Command("paper", {"paper_id": paper_id}))
 
-        @re.command(name="eval", description="黄金データセットで簡易評価を実行します。")
+        @re.command(name="eval", description="研究回答・引用・実行成果を評価します。")
         async def re_eval(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("eval"))
 
-        @re.command(name="cost", description="API呼び出し数や推定トークンなどのコスト状況を表示します。")
+        @re.command(name="cost", description="API・Agent・推定tokenを表示します。")
         async def re_cost(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("cost"))
 
-        @re.command(name="doctor", description="ResearchAgentの設定と接続状態を診断します。")
+        @re.command(name="doctor", description="設定、sandbox、接続状態を診断します。")
         async def re_doctor(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("doctor"))
 
-        @re.command(name="runs", description="保存済み研究runの一覧を表示します。")
+        @re.command(name="runs", description="保存済み研究runを表示します。")
         async def re_runs(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("runs"))
 
-        @re.command(name="accept", description="研究品質確認のPhase Gateを承認します。")
+        @re.command(name="accept", description="Phase Gateを承認します。")
         async def re_accept(interaction: discord.Interaction, gate_id: str) -> None:
             await handle(interaction, Command("accept", {"gate_id": gate_id}))
 
-        @re.command(name="revise", description="Phase Gateを差し戻し、理由を記録します。")
-        async def re_revise(interaction: discord.Interaction, gate_id: str, reason: str) -> None:
-            await handle(interaction, Command("revise", {"gate_id": gate_id, "reason": reason}))
+        @re.command(name="revise", description="Phase Gateを差し戻します。")
+        async def re_revise(
+            interaction: discord.Interaction,
+            gate_id: str,
+            reason: str,
+        ) -> None:
+            await handle(
+                interaction,
+                Command("revise", {"gate_id": gate_id, "reason": reason}),
+            )
 
-        @re.command(name="approve", description="危険操作やfail-closedの承認待ちAPを許可します。")
-        async def re_approve(interaction: discord.Interaction, approval_id: str) -> None:
-            await handle(interaction, Command("approve", {"approval_id": approval_id}))
+        @re.command(name="approve", description="危険操作またはfail-closed停止を承認します。")
+        async def re_approve(
+            interaction: discord.Interaction,
+            approval_id: str,
+        ) -> None:
+            await handle(
+                interaction,
+                Command("approve", {"approval_id": approval_id}),
+            )
 
-        @re.command(name="reject", description="承認待ちAPを却下します。")
-        async def re_reject(interaction: discord.Interaction, approval_id: str, reason: str) -> None:
-            await handle(interaction, Command("reject", {"approval_id": approval_id, "reason": reason}))
+        @re.command(name="reject", description="承認待ちを却下します。")
+        async def re_reject(
+            interaction: discord.Interaction,
+            approval_id: str,
+            reason: str,
+        ) -> None:
+            await handle(
+                interaction,
+                Command(
+                    "reject",
+                    {"approval_id": approval_id, "reason": reason},
+                ),
+            )
 
-        @re.command(name="stop", description="実行中Agentを停止し、研究セッションを終了します。")
+        @re.command(name="stop", description="Agentを停止し研究セッションを終了します。")
         async def re_stop(interaction: discord.Interaction) -> None:
             await handle(interaction, Command("stop"))
 
@@ -242,7 +294,7 @@ class WorkerDiscordBotAdapter:
 
 
 class ThreadSafeDiscordChannelAdapter(DiscordChannelAdapter):
-    """Discord output adapter safe to call from the command worker thread."""
+    """Output adapter safe to call from the command worker thread."""
 
     def send(self, message: str, channel: str = "important") -> None:
         channel_id = self.log_channel_id if channel == "log" else self.important_channel_id

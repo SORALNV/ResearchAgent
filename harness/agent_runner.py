@@ -37,13 +37,29 @@ class RoundOutput:
 
 
 class MockAgentRunner:
-    """Deterministic runner that proves harness flow before real agents exist."""
+    """Compatibility facade: mock without commands, real multi-agent execution with commands."""
 
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
         self.prompts = self._load_prompts(config.project_root / "prompts")
+        self._real_runner = None
+        if any(
+            (
+                config.main_agent_command,
+                config.sub_agent_command,
+                config.review_agent_command,
+                config.fresh_agent_command,
+                config.claude_agent_command,
+            )
+        ):
+            from harness.multi_agent_runner import MultiAgentRunner
 
-    def run_round(self, session: ResearchSession) -> RoundOutput:
+            self._real_runner = MultiAgentRunner(config)
+
+    def run_round(self, session: ResearchSession):
+        if self._real_runner is not None:
+            return self._real_runner.run_round(session)
+
         round_number = session.round_id + 1
         current_question = f"R{round_number}: {session.research_goal}"
         conversation = ConversationSession(
@@ -75,13 +91,6 @@ class MockAgentRunner:
             )
         subtask = f"Mock sub-agent: {self.prompts['sub']}"
         sub_agent_output = "Mock sub-agent output: 変更diffなし。E2E観点は満たせる見込み。"
-        if self.config.sub_agent_command:
-            sub_agent_output = SubAgentCommandRunner(self.config).run(
-                session=session,
-                round_number=round_number,
-                task=subtask,
-            )
-            proposed_operation = proposed_operation or parse_approval_required(sub_agent_output)
         return RoundOutput(
             main_agent_summary=f"{self.prompts['main']} {current_question} を分解し、MVP配線の進捗を統合した。",
             subtask=subtask,
@@ -108,6 +117,8 @@ class MockAgentRunner:
 
 
 class SubAgentCommandRunner:
+    """Backward-compatible direct sub-agent command runner."""
+
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
 

@@ -1,38 +1,43 @@
-# Discord channel routing and human decision boundary
+# Discord channel domain routing
 
 ## Purpose
 
-ResearchAgent uses one Discord-facing control plane for both domains. The
-selected domain is determined by the Discord channel ID, not by guessing from
-message text:
+The Discord Edge selects `research` or `kaggle` from configured channel IDs.
+Users do not switch modes with a command, and a model cannot choose its own
+domain.
+
+The runtime hierarchy is:
 
 ```text
-Discord channel / thread
-        ↓ strict ChannelDomainMap
-Research domain       Kaggle domain
-        \               /
-          Project / WorkSession / Event / Steering
+configured Discord channel
+  -> dedicated Discord Thread / Forum post
+    -> one WorkSession
+      -> domain-specific AI consultation handler
+      -> Job / Event / Steering / human decision gates
 ```
 
-A parent text/forum channel can be mapped once and its child threads inherit
-that domain. An exact thread ID mapping overrides its parent. Unmapped channels
-fail closed and are not silently treated as Research.
+An exact channel or thread mapping wins over its parent mapping. Otherwise a
+Thread inherits its parent's domain. An unconfigured channel is ignored by the
+real Discord Edge and rejected by the router API. It never falls back to another
+domain.
 
 ## Configuration
 
-Use either the compact map, the separate channel lists, or both:
+Use either the explicit map, split lists, or both:
 
 ```env
-# Compact syntax
+# Compact form
 DISCORD_CHANNEL_DOMAIN_MAP=111111111111111111=research,222222222222222222=kaggle
 
-# Equivalent split lists; comma-separated IDs are accepted.
+# Equivalent split form
 DISCORD_RESEARCH_CHANNEL_IDS=111111111111111111
 DISCORD_KAGGLE_CHANNEL_IDS=222222222222222222
 
-# Durable router state. Relative paths are resolved under PROJECT_ROOT.
-# Keep this directory on persistent storage.
+# Durable Project / WorkSession / Job / Event / Steering state
 CONTROL_PLANE_DIR=control_plane
+
+# A message in a mapped parent text channel creates a dedicated Thread.
+DISCORD_CREATE_THREADS=true
 ```
 
 JSON is also accepted:
@@ -41,125 +46,133 @@ JSON is also accepted:
 DISCORD_CHANNEL_DOMAIN_MAP={"111111111111111111":"research","222222222222222222":"kaggle"}
 ```
 
-Rules:
+Configuration rules:
 
-1. An exact channel/thread mapping wins.
-2. Otherwise a child thread inherits its parent channel mapping.
-3. A channel cannot be mapped to both domains.
-4. `hybrid` is valid for a long-lived Project but not for Discord channel
-   routing. A Discord conversation must have one active domain.
-5. `DISCORD_CHANNEL_ID` remains a backward-compatible Research mapping only
-   when no explicit domain mapping exists.
-6. Unknown channels raise `UnmappedDiscordChannelError`.
+- IDs must be numeric Discord snowflakes.
+- A channel cannot be mapped to both domains.
+- `hybrid` is deliberately rejected at the Discord boundary.
+- Unknown channels fail closed.
+- `DISCORD_CHANNEL_ID` alone keeps the legacy single-channel Research bot.
+- Setting one of the new domain-routing variables selects the routed Discord
+  Edge when `python main.py bot` starts.
 
-## WorkSession binding
+## Runtime behavior
 
-`DiscordThreadRouter` creates a deterministic, domain-scoped Project for each
-mapped parent channel unless the caller supplies a Project ID. It then creates
-one WorkSession per Discord thread/forum post/conversation and persists the full
-Discord route in `external_ref`.
+### Parent channel
 
-Incoming messages are stored as immutable `discord.message.received` control
-events. Discord retries reuse the original event through an idempotency key.
-Domain handlers receive that event and must use its `event_id` as their own
-correlation/idempotency key.
+With `DISCORD_CREATE_THREADS=true`, a normal message in a mapped parent text
+channel creates a dedicated Thread. The original message becomes the first
+message of the new WorkSession, and the AI response is posted in that Thread.
 
-```python
-from harness.control_plane import Domain
-from harness.discord_thread_router import (
-    DiscordChannelDispatcher,
-    DiscordLocation,
-    DiscordThreadRouter,
-)
+Forum posts already arrive as Discord Threads and are used directly.
 
-router = DiscordThreadRouter.from_environment()
-dispatcher = DiscordChannelDispatcher(
-    router,
-    {
-        Domain.RESEARCH: research_handler,
-        Domain.KAGGLE: kaggle_handler,
-    },
-)
+### Thread
 
-result = dispatcher.dispatch_message(
-    DiscordLocation(
-        guild_id="999",
-        channel_id="333",        # thread ID
-        parent_channel_id="222", # mapped Kaggle parent
-        thread_id="333",
-    ),
-    message_id="444",
-    actor_id="555",
-    text="この特徴量仮説を試したい",
-    title="Kaggle: feature hypothesis",
-)
-assert result.domain == Domain.KAGGLE
+Each Thread or direct mapped conversation has one durable WorkSession. The
+router stores:
+
+- the selected domain;
+- guild, parent-channel, channel, and thread identifiers;
+- the three human direction decisions for that domain;
+- the AI-owned execution responsibilities;
+- idempotent incoming and outgoing Discord events.
+
+A repeated Discord delivery reuses the original incoming event and cached
+assistant response rather than invoking the model twice.
+
+### AI consultation
+
+The routed Edge uses the existing provider policy:
+
+```env
+PLANNING_AGENT_RUNTIME_ORDER=openai_responses,codex_cli
 ```
 
-The dispatcher does not fall back from a missing Kaggle handler to a Research
-handler. That would mix state and is rejected with `MissingDomainHandlerError`.
+The Research and Kaggle handlers receive different system constraints.
+
+Research mode emphasizes prior work, falsifiability, evidence, and
+reproducibility. Kaggle mode emphasizes competition rules, locked validation,
+leakage control, reproducibility, and candidate validation. Neither handler may
+perform a final human-only decision.
+
+This handler is a read-only conversation and planning layer. Long-running
+experiments must become durable Jobs and be delegated to a Compute Backend;
+they are not executed inside the Discord response path.
 
 ## Human responsibility boundary
 
-There are exactly three research-direction decisions per domain.
+There are three research-direction decisions per domain.
 
-| Domain | Human-owned decision 1 | Human-owned decision 2 | Human-owned decision 3 |
-|---|---|---|---|
-| Research | AIと相談して何を試すか選ぶ | 実験結果を解釈する | 論文としてまとめるか決める |
-| Kaggle | AIと相談して何を試すか選ぶ | 実験結果を解釈する | そのsubmissionを提出してよいか決める |
+| Domain | Human-only decisions |
+|---|---|
+| Research | hypothesis selection; final result interpretation; whether to start preparing a paper |
+| Kaggle | hypothesis selection; final result interpretation; whether to submit an exact candidate |
 
-The Agent owns the remaining research work: public-information investigation,
-implementation, tests, error repair, smoke tests, experiment execution, logs,
-comparison, counterarguments, artifact/checkpoint management, and proposing the
-next hypothesis. In Kaggle mode it may validate and present a submission
-candidate but may not submit it. In Research mode it may prepare a paper draft
-only after the human paper decision.
+The AI owns the remaining routine work:
 
-This table describes **research-direction ownership**. Existing operational
-safety gates remain separate: destructive operations, credential exposure,
-paid compute, external publication, and Computer Use must still obey their
-security/approval policy. Removing those gates would make unattended operation
-unsafe.
+- implementation and code changes;
+- debugging and retry design;
+- public-information and literature investigation;
+- experiment execution through a Compute Backend;
+- logs, artifacts, comparisons, and reproducibility evidence;
+- review assistance and interpretation candidates.
 
-## Enforced gates
+Operational safety approvals remain separate. Paid compute, credential changes,
+destructive operations, external publication, and other high-impact actions may
+still require approval even though they are not research-direction decisions.
 
-`HumanResponsibilityPolicy` maps controlled actions to immutable human decision
-events:
+## Discord commands
 
-```text
-start_experiment      -> hypothesis
-continue_from_result  -> result_interpretation
-submit_kaggle         -> kaggle_submission
-start_paper_draft     -> research_paper
-```
-
-A Bot or Agent cannot satisfy these gates. Decisions are scoped to one
-WorkSession and one `subject_ref`, so approval for one hypothesis/result cannot
-be reused for another.
-
-Kaggle submission approval is additionally bound to the exact file SHA-256:
+The routed Edge registers one common `/agent` group.
 
 ```text
-subject_ref = sha256:<64 lowercase hex characters>
+/agent mode
+/agent status
+
+/agent hypothesis subject_ref:<id> verdict:<accept|reject|defer> note:<text>
+/agent interpret result_ref:<id> verdict:<accept|reject|defer> interpretation:<text>
+
+/agent submit sha256:<64 hex> verdict:<accept|reject|defer> note:<text>
+/agent paper result_ref:<id> verdict:<accept|reject|defer> note:<text>
+
+/agent gate action:<action> subject_ref:<id>
 ```
 
-Changing even one byte produces another hash and invalidates the old approval.
-The latest human verdict for the same subject wins, so a later `reject` or
-`defer` withdraws an earlier `accept`.
+`approve`, `approved`, and `yes` are accepted aliases for `accept`; `deny` and
+`rejected` are aliases for `reject`.
 
-## Integration contract for Discord Edge
+Domain restrictions are enforced:
 
-The Discord Edge should perform these steps for each message:
+- `/agent submit` is valid only in a Kaggle WorkSession.
+- `/agent paper` is valid only in a Research WorkSession.
+- a model or bot account cannot record a human decision.
+- submission approval is normalized to `sha256:<64 lowercase hex>`.
+- a changed submission file hash invalidates the previous approval.
+- later decisions for the same subject override earlier decisions.
 
-1. Build `DiscordLocation` from guild, channel/thread, and parent IDs.
-2. Call `DiscordChannelDispatcher.dispatch_message`.
-3. Pass `result.ingress.route` to the selected Research or Kaggle handler.
-4. Use `result.correlation_id` for handler-side idempotency.
-5. Record hypothesis, interpretation, final submission, or paper decisions with
-   `record_human_decision` only when `message.author.bot` is false.
-6. Before a controlled action, call `check_human_gate` with the exact subject.
-7. Continue to apply the existing safety, checkpoint, review, cancellation, and
-   artifact-promotion mechanisms.
+Controlled action names for `/agent gate` are:
 
-No Discord token, Kaggle token, OpenAI key, or other credential is stored in the
-channel map, Project, WorkSession, or decision events.
+```text
+start_experiment
+continue_from_result
+submit_kaggle
+start_paper_draft
+```
+
+The gate API is also callable by future Compute Broker, Kaggle submission, and
+paper-generation integrations. These integrations must check the gate
+immediately before the controlled action.
+
+## Failure behavior
+
+The routed path is deliberately fail closed:
+
+- no domain mapping: no routed processing;
+- no handler for the selected domain: no fallback to the other domain;
+- model/runtime failure: the incoming message remains recorded and an explicit
+  diagnostic response is stored;
+- missing human decision: controlled action remains blocked;
+- wrong domain or wrong subject/hash: controlled action remains blocked;
+- duplicate Discord delivery: no duplicate model call or decision event.
+
+Credentials are not stored in Project, WorkSession, Event, or Steering records.

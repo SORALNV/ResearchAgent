@@ -9,6 +9,8 @@ __pycache__
 .env
 runtime
 research_runs
+control_plane
+discord_work_sessions
 sessions
 artifacts
 *.log

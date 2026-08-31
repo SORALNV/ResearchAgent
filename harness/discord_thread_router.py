@@ -325,7 +325,10 @@ class DiscordThreadRouter:
                 f"{route.domain.value} mode"
             )
         if not actor_is_human:
-            raise PermissionError("an Agent or Bot cannot satisfy a human decision gate")
+            raise PermissionError(
+                "human-authenticated Discord user required; an Agent or Bot "
+                "cannot satisfy a human decision gate"
+            )
         actor_id = str(actor_id).strip()
         message_id = str(message_id).strip()
         if not actor_id:

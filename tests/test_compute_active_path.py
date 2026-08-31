@@ -108,6 +108,4 @@ def test_worker_serializes_duplicate_submit_for_the_same_job(tmp_path: Path):
         results = list(pool.map(lambda _: worker.submit(body), range(8)))
 
     assert backend.submit_count == 1
-    assert {item["backend_job_id"] for item in results} == {
-        f"worker_process-{job.job_id}"
-    }
+    assert {item["backend_job_id"] for item in results} == {job.job_id}

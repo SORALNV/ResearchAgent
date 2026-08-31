@@ -13,11 +13,15 @@ from harness.provider_executor import (
 
 
 class ProviderAwareAgentCommandExecutor(ProviderExecutorBase):
-    """Concrete provider executor with a strict workspace-write boundary.
+    """Concrete provider executor with strict local and GUI safety boundaries.
 
     Plain Responses API calls can reason and review but cannot mutate the local
     task workspace. Only local CLI providers (normally Codex CLI) are eligible
     for ``workspace-write`` until a sandboxed file-tool provider is added.
+
+    Computer Use is also fail-closed here rather than relying on ``doctor``:
+    a non-empty stage allowlist and mandatory harness approval are required at
+    execution time.
     """
 
     def __init__(
@@ -37,6 +41,49 @@ class ProviderAwareAgentCommandExecutor(ProviderExecutorBase):
             invocation_cls=AgentInvocation,
             openai_client_factory=openai_client_factory,
             bridge_request=bridge_request,
+        )
+
+    def _run_openai_computer(
+        self,
+        *,
+        session,
+        role: str,
+        stage: str,
+        prompt: str,
+        task_id: str | None,
+    ) -> RuntimeAttempt:
+        if not self.settings.computer_allowed_stages:
+            return RuntimeAttempt(
+                provider="openai_computer",
+                output=(
+                    "OpenAI computer provider is blocked: "
+                    "OPENAI_COMPUTER_ALLOWED_STAGES is empty."
+                ),
+                stderr="a non-empty computer stage allowlist is required",
+                returncode=126,
+                duration_seconds=0.0,
+                skipped=True,
+                retryable=False,
+            )
+        if not self.settings.computer_require_approval:
+            return RuntimeAttempt(
+                provider="openai_computer",
+                output=(
+                    "OpenAI computer provider is blocked: harness approval "
+                    "enforcement must remain enabled."
+                ),
+                stderr="OPENAI_COMPUTER_REQUIRE_APPROVAL must be true",
+                returncode=126,
+                duration_seconds=0.0,
+                skipped=True,
+                retryable=False,
+            )
+        return super()._run_openai_computer(
+            session=session,
+            role=role,
+            stage=stage,
+            prompt=prompt,
+            task_id=task_id,
         )
 
     def run(

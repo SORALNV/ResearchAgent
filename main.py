@@ -16,6 +16,8 @@ from harness.final_actions import (
     build_complete_routed_service,
 )
 from harness.hardened_orchestrator import HardenedResearchOrchestrator
+from harness.kaggle_cli_transport import current_kaggle_transport_from_env
+from harness.kaggle_submission import build_kaggle_submission_pipeline
 from harness.routed_discord_adapter import DomainRoutedDiscordBotAdapter
 from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
@@ -43,7 +45,16 @@ def build_routed_discord_service(
         ControlPlaneStore(control_plane_dir),
         ChannelDomainMap.from_environment(os.environ),
     )
-    service = build_complete_routed_service(config, router)
+    submission = build_kaggle_submission_pipeline(
+        router=router,
+        project_root=config.project_root,
+        transport=current_kaggle_transport_from_env(),
+    )
+    service = build_complete_routed_service(
+        config,
+        router,
+        submission=submission,
+    )
     _configure_kaggle_backend_capabilities(service)
     if not _bool_env("LOCAL_PROCESS_COMPUTE_ENABLED", False):
         # AI-generated experiments must not share the Core process namespace by

@@ -155,8 +155,19 @@ class DiscordThreadRouter:
         environ: Mapping[str, str] | None = None,
     ) -> "DiscordThreadRouter":
         source = dict(os.environ if environ is None else environ)
-        configured = str(source.get("CONTROL_PLANE_DIR") or "runtime/control_plane")
-        target = Path(root if root is not None else configured).expanduser()
+        if root is not None:
+            target = Path(root).expanduser()
+        else:
+            configured = Path(
+                str(source.get("CONTROL_PLANE_DIR") or "control_plane")
+            ).expanduser()
+            if configured.is_absolute():
+                target = configured
+            else:
+                project_root = Path(
+                    str(source.get("PROJECT_ROOT") or ".")
+                ).expanduser()
+                target = project_root / configured
         return cls(
             ControlPlaneStore(target),
             ChannelDomainMap.from_environment(source),

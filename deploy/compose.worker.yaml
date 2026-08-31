@@ -1,0 +1,42 @@
+name: research-agent-worker
+
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        INSTALL_CODEX: "false"
+    image: ${RESEARCH_AGENT_IMAGE:-research-agent:local}
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      RESEARCH_AGENT_ROLE: worker
+      WORKER_HOST: 0.0.0.0
+      WORKER_PORT: 8090
+      WORKER_DATA_DIR: /data/worker
+      CONTAINER_PRINT_PLATFORM: ${CONTAINER_PRINT_PLATFORM:-true}
+    command:
+      - python
+      - -m
+      - harness.compute_worker
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8090"
+      - --data-dir
+      - /data/worker
+    volumes:
+      - ${RA_WORKER_RUNTIME_DIR:-../worker-runtime}:/data/worker
+    ports:
+      - ${WORKER_BIND_ADDRESS:-127.0.0.1}:${WORKER_BIND_PORT:-8090}:8090
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=2g
+      - /home/researchagent:rw,nosuid,nodev,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s

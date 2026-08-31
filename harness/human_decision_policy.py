@@ -113,9 +113,16 @@ class HumanResponsibilityPolicy:
             "checkpoint、artifact、再開、失敗実験の保存",
         )
         if normalized == Domain.KAGGLE:
-            return (*common, "submission候補の検証と提示。ただし提出はしない")
+            return (
+                *common,
+                "submission候補の形式・SHA-256検証",
+                "人間がexact SHA-256を承認した後のKaggle提出、履歴照合、LB記録",
+            )
         if normalized == Domain.RESEARCH:
-            return (*common, "論文草稿の作成。ただし論文化開始は人間判断後")
+            return (
+                *common,
+                "人間が論文化を承認した後の根拠束作成、文献整理、草稿、レビュー、改稿、Markdown/LaTeX成果物生成",
+            )
         raise ValueError("agent responsibility policy requires research or kaggle")
 
     @classmethod

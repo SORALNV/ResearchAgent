@@ -5,13 +5,9 @@ from pathlib import Path
 
 from harness.approval import ApprovalGate, ProposedOperation
 from harness.config import HarnessConfig
-from harness.multi_agent_types import AgentCommandExecutor, AgentInvocation
 from harness.process_manager import ProcessCancellationController
-from harness.provider_executor import build_provider_executor_class
+from harness.provider_runtime import ProviderAwareAgentCommandExecutor as Executor
 from harness.state import ResearchSession
-
-
-Executor = build_provider_executor_class(AgentCommandExecutor, AgentInvocation)
 
 
 @dataclass

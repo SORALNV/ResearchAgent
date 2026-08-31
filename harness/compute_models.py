@@ -120,40 +120,34 @@ class BackendCapabilities:
             reasons.append(
                 f"requires {request.gpu_count} GPU(s); backend has {self.gpu_count}"
             )
-        if (
-            request.gpu_memory_mb is not None
-            and self.gpu_memory_mb is not None
-            and request.gpu_memory_mb > self.gpu_memory_mb
-        ):
-            reasons.append(
-                f"requires {request.gpu_memory_mb}MB GPU memory; "
-                f"backend has {self.gpu_memory_mb}MB"
-            )
-        if (
-            request.cpu_cores is not None
-            and self.cpu_cores is not None
-            and request.cpu_cores > self.cpu_cores
-        ):
-            reasons.append(
-                f"requires {request.cpu_cores} CPU cores; backend has {self.cpu_cores}"
-            )
-        if (
-            request.memory_mb is not None
-            and self.memory_mb is not None
-            and request.memory_mb > self.memory_mb
-        ):
-            reasons.append(
-                f"requires {request.memory_mb}MB RAM; backend has {self.memory_mb}MB"
-            )
-        if (
-            request.ephemeral_storage_mb is not None
-            and self.ephemeral_storage_mb is not None
-            and request.ephemeral_storage_mb > self.ephemeral_storage_mb
-        ):
-            reasons.append(
-                f"requires {request.ephemeral_storage_mb}MB storage; "
-                f"backend has {self.ephemeral_storage_mb}MB"
-            )
+        _require_known_capacity(
+            reasons,
+            requested=request.gpu_memory_mb,
+            available=self.gpu_memory_mb,
+            label="GPU memory",
+            unit="MB",
+        )
+        _require_known_capacity(
+            reasons,
+            requested=request.cpu_cores,
+            available=self.cpu_cores,
+            label="CPU cores",
+            unit="",
+        )
+        _require_known_capacity(
+            reasons,
+            requested=request.memory_mb,
+            available=self.memory_mb,
+            label="RAM",
+            unit="MB",
+        )
+        _require_known_capacity(
+            reasons,
+            requested=request.ephemeral_storage_mb,
+            available=self.ephemeral_storage_mb,
+            label="ephemeral storage",
+            unit="MB",
+        )
         if request.network_required and not self.network_available:
             reasons.append("job requires network access")
         missing_labels = set(request.labels) - set(self.labels)
@@ -288,7 +282,9 @@ class ComputeRuntimeRecord:
                 str(data["result_ref"]) if data.get("result_ref") else None
             ),
             selected_at=(
-                str(data["selected_at"]) if data.get("selected_at") else None
+                str(data["selected_at"])
+                if data.get("selected_at")
+                else None
             ),
             updated_at=str(data.get("updated_at") or utc_timestamp()),
             metadata=json_dict(data.get("metadata")),
@@ -402,3 +398,26 @@ def _normalize_accelerator(value: str) -> str:
     if normalized in {"cuda", "nvidia", "gpu"}:
         return "gpu"
     return normalized or "cpu"
+
+
+def _require_known_capacity(
+    reasons: list[str],
+    *,
+    requested: int | float | None,
+    available: int | float | None,
+    label: str,
+    unit: str,
+) -> None:
+    if requested is None:
+        return
+    suffix = unit if unit else ""
+    if available is None:
+        reasons.append(
+            f"requires {requested}{suffix} {label}; backend capacity is unknown"
+        )
+        return
+    if requested > available:
+        reasons.append(
+            f"requires {requested}{suffix} {label}; "
+            f"backend has {available}{suffix}"
+        )

@@ -18,9 +18,9 @@ Control Plane Job (queued)
         v
 Compute Broker
   |-- Kaggle Notebook
+  |-- local GPU Worker sidecar
   |-- owned/external GPU Worker
-  |-- local GPU
-  `-- local CPU
+  `-- explicitly trusted Core process backend
         |
         v
 materialize/repair -> smoke test -> submit -> poll -> collect
@@ -112,15 +112,18 @@ Kaggle, Worker, or OpenAI credentials through the experiment environment.
 
 ## Backend routing
 
-A Job's `backend_preferences` are tried first. The default order is:
+A Job's `backend_preferences` are tried first. The default production order is:
 
 ```text
 Kaggle:
-  kaggle_notebook -> remote worker(s) -> local_gpu -> local_cpu
+  kaggle_notebook -> local_gpu_worker -> remote worker(s)
 
 Research:
-  remote worker(s) -> local_gpu -> local_cpu
+  local_gpu_worker -> remote worker(s)
 ```
+
+If a Job explicitly supplies `backend_preferences`, those names are tried before
+the configured domain order. Missing/unconfigured names are skipped.
 
 The broker checks, in order:
 
@@ -137,27 +140,43 @@ The first compatible backend wins. Rejections are persisted in the
 `compute.backend.selected` event. If no backend satisfies the JobSpec, the Job
 is paused instead of silently running on an incompatible host.
 
-### LocalProcessBackend
+### Local GPU Worker sidecar
 
-The local backend supports CPU and NVIDIA GPU modes. GPU discovery uses
-`nvidia-smi`, or explicit `LOCAL_GPU_COUNT` / `LOCAL_GPU_MEMORY_MB` values.
-
-The long command runs through `harness.compute_process` in a dedicated process
-group. It writes `.compute_exit.json`, allowing a restarted Core to determine
-whether a process completed even when the original in-memory `Popen` object no
-longer exists.
-
-Only an environment allowlist is forwarded. In particular, `DISCORD_*`,
-`OPENAI_*`, `KAGGLE_*`, and Worker bearer tokens are not copied into the
-experiment process.
-
-For a Core container with direct NVIDIA access:
+`compose.local-gpu.yaml` does **not** attach the GPU to Core. It starts a second
+container using the Worker role and gives only that container NVIDIA device
+access. Core reaches it through the internal Compose network as
+`local_gpu_worker`.
 
 ```bash
-docker compose -f compose.yaml -f compose.local-gpu.yaml up -d
+# Put a distinct random token in LOCAL_GPU_WORKER_TOKEN first.
+docker compose -f compose.yaml -f compose.local-gpu.yaml up -d --build
 ```
 
-The normal GPU-less Core deployment continues to use only `compose.yaml`.
+The sidecar receives only `WORKER_*`, resource-inventory, and NVIDIA variables.
+It does not receive the Core Discord token, OpenAI key, Codex authentication,
+or Kaggle credentials. Its persistent state is mounted separately at
+`RA_LOCAL_GPU_WORKER_RUNTIME_DIR`.
+
+This is the normal local-GPU path, including when Core and the GPU are on the
+same physical machine.
+
+### Opt-in LocalProcessBackend
+
+A CPU/GPU process backend still exists for deterministic tests and explicitly
+trusted deployments. It runs argv commands through `harness.compute_process`,
+uses process-group cancellation, writes `.compute_exit.json`, and forwards only
+an environment allowlist.
+
+It is removed from the active Discord/Core broker unless:
+
+```env
+LOCAL_PROCESS_COMPUTE_ENABLED=true
+```
+
+Do not enable it for arbitrary AI-generated code in the normal Core container.
+The Core owns high-value credentials and the in-process backend does not provide
+a complete filesystem/network isolation boundary. Use a Worker container
+instead.
 
 ### KaggleNotebookBackend
 
@@ -174,9 +193,12 @@ to `JobSpec`, source bundles, Worker state, or Agent prompts. The backend never
 submits a competition prediction file; final submission remains a separate
 SHA-256-bound human gate.
 
+The CLI may use `KAGGLE_API_TOKEN`, or the conventional
+`KAGGLE_USERNAME`/`KAGGLE_KEY` configuration.
+
 ### RemoteGpuBackend
 
-An owned GPU PC and a rented GPU VM use the same Worker API. The Core sends:
+An owned GPU PC and a rented GPU VM use the same Worker API. Core sends:
 
 - the immutable Job record;
 - a bounded ZIP source bundle;
@@ -199,9 +221,30 @@ REMOTE_GPU_WORKER_GPU_MEMORY_MB=24576
 Multiple Workers use `COMPUTE_REMOTE_WORKERS_JSON`. Use `token_env` to reference
 a separate environment variable rather than placing the token in JSON.
 
-## Portable Worker
+## Portable external Worker
 
-Run the Worker directly:
+Copy and edit the Worker-only environment file on the GPU host:
+
+```bash
+cp deploy/.env.worker.example deploy/.env.worker
+```
+
+Then run:
+
+```bash
+docker compose \
+  --env-file deploy/.env.worker \
+  -f deploy/compose.worker.yaml \
+  -f deploy/compose.worker-gpu.yaml \
+  up -d --build
+```
+
+The Worker compose file deliberately does not import Core `.env`. The base
+Worker is CPU-capable; the GPU overlay adds NVIDIA device access. The default
+published address is `127.0.0.1`; expose it through Tailscale, a private network,
+or TLS rather than publishing the bearer-token API directly to the Internet.
+
+Direct execution is also available:
 
 ```bash
 WORKER_TOKEN='distinct-secret' \
@@ -210,20 +253,6 @@ WORKER_GPU_MEMORY_MB=24576 \
 python -m harness.compute_worker --host 0.0.0.0 --port 8090 \
   --data-dir ./worker-runtime
 ```
-
-Or use the container deployment:
-
-```bash
-docker compose \
-  -f deploy/compose.worker.yaml \
-  -f deploy/compose.worker-gpu.yaml \
-  up -d
-```
-
-The base Worker compose file is CPU-capable. The GPU overlay adds NVIDIA device
-access. The default published address is `127.0.0.1`; expose it through
-Tailscale, a private network, or TLS rather than publishing the bearer-token API
-directly to the Internet.
 
 Worker endpoints:
 
@@ -238,7 +267,8 @@ GET  /v1/jobs/{job_id}/artifacts/{relative_path}
 
 All endpoints except `/health` require `Authorization: Bearer <WORKER_TOKEN>`.
 Paths, symlinks, file counts, byte counts, archive hashes, artifact sizes, and
-artifact hashes are validated.
+artifact hashes are validated. Concurrent duplicate submissions for the same
+Job ID are serialized and return the canonical Worker record.
 
 ## Scheduler lifecycle and recovery
 
@@ -268,9 +298,9 @@ For each active Job, `ComputeRuntimeStore` persists:
 - collection status and `result_ref`.
 
 At Core startup, queued and running Jobs are re-enqueued. Remote and Kaggle jobs
-are polled from their durable backend IDs. Local jobs are recovered from PID and
-`.compute_exit.json`. Scheduler shutdown does not cancel active backend work by
-default.
+are polled from their durable backend IDs. Explicitly trusted local-process jobs
+are recovered from PID and `.compute_exit.json`. Scheduler shutdown does not
+cancel active backend work by default.
 
 ## Artifact collection
 
@@ -323,6 +353,22 @@ The accepted proposal is converted into a deterministic child Job, preserving
 the failed/successful parent and preventing accidental duplicate Jobs from
 Discord retries.
 
+## Discord compute operations
+
+The research-direction commands remain `/agent hypothesis`, `/agent interpret`,
+`/agent submit`, and `/agent paper`. Compute operational controls are separate:
+
+```text
+/agent compute_backends
+/agent approve_compute job_id:<JOB-ID>
+/agent cancel_job job_id:<JOB-ID>
+/agent status
+```
+
+`approve_compute` is required only when the selected backend is paid or the Job
+explicitly requests operational approval. `cancel_job` verifies that the Job
+belongs to the current Discord WorkSession.
+
 ## Event types
 
 The scheduler emits bounded status/control events including:
@@ -343,14 +389,14 @@ These events are idempotent and suitable for the Discord Live Status renderer.
 
 Credential-free CI verifies state transitions, routing, local subprocesses,
 source-bundle safety, injected Kaggle CLI behavior, injected remote transports,
-Worker execution, artifact collection, and the parent-result/child-hypothesis
-gates.
+Worker execution, artifact collection, restart recovery, secret isolation, and
+the parent-result/child-hypothesis gates.
 
 The following still require explicit real-environment checks before relying on
 them for expensive work:
 
 - a real Kaggle Notebook push/status/output cycle;
+- the intended local GPU Worker with NVIDIA Container Toolkit;
 - the intended owned GPU PC over Tailscale or another private transport;
-- NVIDIA Container Toolkit and GPU passthrough on each target OS;
 - a rented paid Worker approval flow;
 - restart recovery during an actual multi-hour training run.

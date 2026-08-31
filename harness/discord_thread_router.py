@@ -195,19 +195,39 @@ class DiscordThreadRouter:
             resolution,
             project_id=project_id,
         )
-        session = self.store.create_work_session(
-            project.project_id,
-            title=title.strip() or f"Discord {resolution.domain.value} session",
-            origin="discord",
-            external_ref=location.external_ref(),
-            metadata={
-                "domain": resolution.domain.value,
-                "route_channel_id": resolution.route_channel_id,
-                "human_responsibility_policy": HumanResponsibilityPolicy.metadata(
-                    resolution.domain
-                ),
-            },
-        )
+        try:
+            session = self.store.create_work_session(
+                project.project_id,
+                title=title.strip() or f"Discord {resolution.domain.value} session",
+                origin="discord",
+                external_ref=location.external_ref(),
+                metadata={
+                    "domain": resolution.domain.value,
+                    "route_channel_id": resolution.route_channel_id,
+                    "human_responsibility_policy": HumanResponsibilityPolicy.metadata(
+                        resolution.domain
+                    ),
+                },
+            )
+        except ConflictError:
+            # Concurrent Discord deliveries can both miss the initial lookup.
+            # The store serializes creation and enforces external-ref uniqueness;
+            # the losing caller reloads the canonical binding.
+            session = self.store.find_work_session_by_external_ref(
+                location.identity_ref(),
+                origin="discord",
+            )
+            if session is None:
+                raise
+            project = self.store.get_project(session.project_id)
+            if project.domain != resolution.domain:
+                raise ConflictError(
+                    "Discord conversation was concurrently bound to another domain"
+                )
+            if project_id is not None and session.project_id != project_id:
+                raise ConflictError(
+                    "Discord conversation was concurrently bound to another project"
+                )
         self.store.append_event(
             event_type="discord.route.bound",
             lane=EventLane.CONTROL,

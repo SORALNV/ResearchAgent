@@ -85,13 +85,13 @@ Immediately before submission Core:
 3. re-hashes the file and rejects any byte change;
 4. confirms that the competition is in `KAGGLE_RULES_ACKNOWLEDGED`;
 5. checks existing Kaggle submission history for the deterministic marker;
-6. invokes the official command:
+6. invokes the current official Kaggle CLI syntax:
 
 ```text
-kaggle competitions submit -c <competition> -f <csv> -m <message-with-marker>
+kaggle competitions submit <competition> -f <csv> -m <message-with-marker>
 ```
 
-7. polls `kaggle competitions submissions -c <competition> -v` and records the
+7. polls `kaggle competitions submissions <competition> -v -q` and records the
    submission status and available public/private scores.
 
 If Core crashes or the network response becomes ambiguous after the submit

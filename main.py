@@ -42,7 +42,15 @@ def build_routed_discord_service(
         ControlPlaneStore(control_plane_dir),
         ChannelDomainMap.from_environment(os.environ),
     )
-    return build_autonomous_routed_service(config, router)
+    service = build_autonomous_routed_service(config, router)
+    if not _bool_env("LOCAL_PROCESS_COMPUTE_ENABLED", False):
+        # AI-generated experiments must not share the Core process namespace by
+        # default because Core owns Codex/OpenAI/Kaggle/Discord credentials.
+        # A local GPU is provided safely through compose.local-gpu.yaml, which
+        # runs the same Worker API in a secret-minimal sidecar.
+        service.compute.broker.backends.pop("local_gpu", None)
+        service.compute.broker.backends.pop("local_cpu", None)
+    return service
 
 
 def _print_result(orchestrator: HardenedResearchOrchestrator, command: Command) -> None:

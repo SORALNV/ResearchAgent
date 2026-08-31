@@ -1,0 +1,33 @@
+name: research-agent
+
+services:
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_CODEX: ${INSTALL_CODEX:-true}
+    image: ${RESEARCH_AGENT_IMAGE:-research-agent:local}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PROJECT_ROOT: /data/runtime
+      RESEARCH_ARCHIVE_DIR: /data/research_runs
+      CODEX_HOME: /data/codex
+      AGENT_SANDBOX_BACKEND: none
+      AGENT_ALLOW_UNSANDBOXED_GENERIC: "false"
+      CONTAINER_PRINT_PLATFORM: ${CONTAINER_PRINT_PLATFORM:-true}
+    volumes:
+      - ${RA_RUNTIME_DIR:-./runtime}:/data/runtime
+      - ${RA_RESEARCH_DIR:-./research_runs}:/data/research_runs
+      - ${RA_CODEX_HOME_DIR:-./codex-home}:/data/codex
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m
+      - /home/researchagent:rw,nosuid,nodev,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s

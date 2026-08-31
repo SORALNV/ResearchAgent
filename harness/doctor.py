@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -7,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from harness.config import HarnessConfig
+from harness.provider_executor import RuntimeSettings
 from harness.sandbox import sandbox_capability
 
 
@@ -53,12 +56,39 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
         unsandboxed_ok = True
         unsandboxed_detail = "not applicable"
 
+    runtime = RuntimeSettings.from_environment()
+    selected = set(runtime.global_order)
+    for order in runtime.role_orders.values():
+        selected.update(order)
+    if not selected:
+        for command_text in configured_commands:
+            executable = Path(shlex.split(command_text)[0]).name
+            selected.add("codex_cli" if executable == "codex" else "cli")
+
+    openai_selected = bool({"openai_responses", "openai_computer"} & selected)
+    computer_ready = (
+        not runtime.computer_enabled
+        or (
+            bool(runtime.computer_model)
+            and bool(runtime.computer_bridge_url)
+            and bool(runtime.computer_allowed_stages)
+            and runtime.computer_require_approval
+        )
+    )
+    codex_home = os.getenv("CODEX_HOME")
+    codex_home_detail = codex_home or "未設定（Codex既定値）"
+
     checks = [
         DoctorCheck("project_root", config.project_root.exists(), str(config.project_root)),
         DoctorCheck(
             "research_archive_dir",
             _ensure_dir(config.research_archive_path),
             str(config.research_archive_path),
+        ),
+        DoctorCheck(
+            "runtime_architecture",
+            platform.machine().lower() in {"x86_64", "amd64", "aarch64", "arm64"},
+            f"machine={platform.machine()}, container={Path('/.dockerenv').exists()}",
         ),
         DoctorCheck(
             "important_channel",
@@ -74,6 +104,44 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
             "paper_provider",
             config.paper_provider in {"fake", "arxiv"},
             config.paper_provider,
+        ),
+        DoctorCheck(
+            "runtime_provider_order",
+            bool(selected),
+            _format_provider_orders(runtime, selected),
+        ),
+        DoctorCheck(
+            "openai_responses",
+            (not openai_selected)
+            or (bool(runtime.openai_api_key) and bool(runtime.openai_model)),
+            (
+                "not selected"
+                if not openai_selected
+                else (
+                    f"api_key={'configured' if runtime.openai_api_key else 'missing'}, "
+                    f"model={runtime.openai_model or 'missing'}, "
+                    f"base_url={'custom' if runtime.openai_base_url else 'default'}"
+                )
+            ),
+        ),
+        DoctorCheck(
+            "openai_computer",
+            computer_ready,
+            (
+                "disabled"
+                if not runtime.computer_enabled
+                else (
+                    f"model={runtime.computer_model or 'missing'}, "
+                    f"bridge={'configured' if runtime.computer_bridge_url else 'missing'}, "
+                    f"stages={','.join(runtime.computer_allowed_stages) or 'missing'}, "
+                    f"approval_required={runtime.computer_require_approval}"
+                )
+            ),
+        ),
+        DoctorCheck(
+            "codex_home",
+            ("codex_cli" not in selected) or bool(codex_home),
+            codex_home_detail,
         ),
         DoctorCheck(
             "agent_home_mode",
@@ -149,7 +217,7 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
             )
         else:
             checks.append(
-                DoctorCheck(role, False, "未設定 (role fallback may apply)")
+                DoctorCheck(role, False, "未設定 (provider/role fallback may apply)")
             )
     return checks
 
@@ -162,7 +230,17 @@ def render_doctor(checks: list[DoctorCheck]) -> str:
     return "\n".join(lines)
 
 
-def _ensure_dir(path) -> bool:
+def _format_provider_orders(runtime: RuntimeSettings, selected: set[str]) -> str:
+    parts = [
+        "global=" + (",".join(runtime.global_order) if runtime.global_order else "inferred")
+    ]
+    for role in sorted(runtime.role_orders):
+        parts.append(f"{role}={','.join(runtime.role_orders[role])}")
+    parts.append("selected=" + (",".join(sorted(selected)) or "none"))
+    return "; ".join(parts)
+
+
+def _ensure_dir(path: Path) -> bool:
     path.mkdir(parents=True, exist_ok=True)
     return path.exists() and path.is_dir()
 

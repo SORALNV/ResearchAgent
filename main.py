@@ -6,20 +6,17 @@ from pathlib import Path
 
 from harness.command_parser import parse_research_command
 from harness.commands import Command, CommandContext
+from harness.compute_discord import (
+    AutonomousRoutedDiscordService,
+    build_autonomous_routed_service,
+)
+from harness.compute_models import BackendCapabilities
 from harness.config import HarnessConfig
-from harness.control_plane import ControlPlaneStore, Domain
+from harness.control_plane import ControlPlaneStore
 from harness.discord_adapter import FakeDiscordAdapter
-from harness.discord_thread_router import (
-    ChannelDomainMap,
-    DiscordChannelDispatcher,
-    DiscordThreadRouter,
-)
-from harness.domain_consultation import DomainConsultationHandler
+from harness.discord_thread_router import ChannelDomainMap, DiscordThreadRouter
 from harness.hardened_orchestrator import HardenedResearchOrchestrator
-from harness.routed_discord_adapter import (
-    DomainRoutedDiscordBotAdapter,
-    RoutedDiscordService,
-)
+from harness.routed_discord_adapter import DomainRoutedDiscordBotAdapter
 from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
 
@@ -36,7 +33,7 @@ def build_orchestrator(
 
 def build_routed_discord_service(
     config: HarnessConfig,
-) -> RoutedDiscordService:
+) -> AutonomousRoutedDiscordService:
     control_plane_dir = Path(
         os.getenv("CONTROL_PLANE_DIR", "control_plane")
     ).expanduser()
@@ -46,22 +43,50 @@ def build_routed_discord_service(
         ControlPlaneStore(control_plane_dir),
         ChannelDomainMap.from_environment(os.environ),
     )
-    dispatcher = DiscordChannelDispatcher(
-        router,
-        {
-            Domain.RESEARCH: DomainConsultationHandler(
-                config,
-                router.store,
-                Domain.RESEARCH,
-            ),
-            Domain.KAGGLE: DomainConsultationHandler(
-                config,
-                router.store,
-                Domain.KAGGLE,
-            ),
-        },
+    service = build_autonomous_routed_service(config, router)
+    _configure_kaggle_backend_capabilities(service)
+    if not _bool_env("LOCAL_PROCESS_COMPUTE_ENABLED", False):
+        # AI-generated experiments must not share the Core process namespace by
+        # default because Core owns Codex/OpenAI/Kaggle/Discord credentials.
+        # A local GPU is provided safely through compose.local-gpu.yaml, which
+        # runs the same Worker API in a secret-minimal sidecar.
+        service.compute.broker.backends.pop("local_gpu", None)
+        service.compute.broker.backends.pop("local_cpu", None)
+    return service
+
+
+def _configure_kaggle_backend_capabilities(
+    service: AutonomousRoutedDiscordService,
+) -> None:
+    backend = service.compute.broker.backends.get("kaggle_notebook")
+    if backend is None:
+        return
+    current = backend.capabilities
+    backend.capabilities = BackendCapabilities(
+        accelerators=current.accelerators,
+        domains=current.domains,
+        gpu_count=_nonnegative_int_env("KAGGLE_GPU_COUNT", current.gpu_count),
+        gpu_memory_mb=_optional_positive_int_env(
+            "KAGGLE_GPU_MEMORY_MB",
+            current.gpu_memory_mb,
+        ),
+        cpu_cores=_optional_positive_float_env(
+            "KAGGLE_CPU_CORES",
+            current.cpu_cores,
+        ),
+        memory_mb=_optional_positive_int_env(
+            "KAGGLE_MEMORY_MB",
+            current.memory_mb,
+        ),
+        ephemeral_storage_mb=_optional_positive_int_env(
+            "KAGGLE_STORAGE_MB",
+            current.ephemeral_storage_mb,
+        ),
+        network_available=current.network_available,
+        labels=current.labels,
+        supports_cancel=current.supports_cancel,
+        recoverable=current.recoverable,
     )
-    return RoutedDiscordService(router, dispatcher)
 
 
 def _print_result(orchestrator: HardenedResearchOrchestrator, command: Command) -> None:
@@ -158,12 +183,16 @@ def main() -> None:
             raise SystemExit("DISCORD_BOT_TOKEN or --token is required for the real bot.")
         if _domain_routing_is_configured():
             service = build_routed_discord_service(config)
-            DomainRoutedDiscordBotAdapter(
-                token=token,
-                service=service,
-                create_threads=_bool_env("DISCORD_CREATE_THREADS", True),
-                log_channel_id=config.discord_log_channel_id,
-            ).run()
+            service.start()
+            try:
+                DomainRoutedDiscordBotAdapter(
+                    token=token,
+                    service=service,
+                    create_threads=_bool_env("DISCORD_CREATE_THREADS", True),
+                    log_channel_id=config.discord_log_channel_id,
+                ).run()
+            finally:
+                service.stop(wait=False)
         else:
             WorkerDiscordBotAdapter(
                 orchestrator_factory=lambda discord: HardenedResearchOrchestrator(
@@ -270,6 +299,51 @@ def _bool_env(name: str, default: bool) -> bool:
     if value is None or value == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _nonnegative_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value in {None, ""}:
+        return max(0, int(default))
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return parsed
+
+
+def _optional_positive_int_env(
+    name: str,
+    default: int | None,
+) -> int | None:
+    value = os.getenv(name)
+    if value in {None, ""}:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+def _optional_positive_float_env(
+    name: str,
+    default: float | None,
+) -> float | None:
+    value = os.getenv(name)
+    if value in {None, ""}:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be positive") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive")
+    return parsed
 
 
 if __name__ == "__main__":

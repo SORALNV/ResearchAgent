@@ -89,6 +89,7 @@ _TERMINAL_JOB_STATUSES = {
 _JOB_TRANSITIONS = {
     JobStatus.QUEUED: {
         JobStatus.RUNNING,
+        JobStatus.WAITING_APPROVAL,
         JobStatus.PAUSED,
         JobStatus.FAILED,
         JobStatus.CANCELLED,

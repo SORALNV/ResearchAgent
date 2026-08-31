@@ -1,0 +1,7 @@
+services:
+  worker:
+    gpus: all
+    environment:
+      WORKER_ACCELERATORS: cpu,gpu
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility

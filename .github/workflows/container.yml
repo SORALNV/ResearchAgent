@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - "Dockerfile"
-      - "compose.yaml"
+      - "compose*.yaml"
       - ".dockerignore"
       - "deploy/**"
       - "harness/**"
@@ -14,7 +14,7 @@ on:
     branches: [main]
     paths:
       - "Dockerfile"
-      - "compose.yaml"
+      - "compose*.yaml"
       - ".dockerignore"
       - "deploy/**"
       - "harness/**"
@@ -39,6 +39,16 @@ jobs:
             suffix: arm64
     steps:
       - uses: actions/checkout@v4
+      - name: Validate Compose contracts
+        env:
+          WORKER_TOKEN: ci-worker-token
+          LOCAL_GPU_WORKER_TOKEN: ci-local-gpu-worker-token
+        run: |
+          cp .env.example .env
+          docker compose -f compose.yaml config >/dev/null
+          docker compose -f compose.yaml -f compose.local-gpu.yaml config >/dev/null
+          docker compose --env-file deploy/.env.worker.example -f deploy/compose.worker.yaml config >/dev/null
+          docker compose --env-file deploy/.env.worker.example -f deploy/compose.worker.yaml -f deploy/compose.worker-gpu.yaml config >/dev/null
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6

@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!deploy/.env.worker.example
 state.json
 state.json.tmp
 sessions/
@@ -6,6 +9,8 @@ research_runs/
 runtime/
 control_plane/
 discord_work_sessions/
+compute_runtime/
+worker-runtime/
 __pycache__/
 .pytest_cache/
 *.pyc

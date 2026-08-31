@@ -6,7 +6,7 @@ ARG TARGETARCH
 ARG INSTALL_CODEX=true
 
 LABEL org.opencontainers.image.title="ResearchAgent"
-LABEL org.opencontainers.image.description="Portable Discord research/Kaggle control plane"
+LABEL org.opencontainers.image.description="Portable Discord research/Kaggle control plane and compute worker"
 LABEL org.opencontainers.image.source="https://github.com/SORALNV/ResearchAgent"
 LABEL io.researchagent.targetarch="${TARGETARCH}"
 
@@ -25,7 +25,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # The official Codex installer selects the Linux amd64 or arm64 standalone
-# binary. Set INSTALL_CODEX=false for API-only or CI images.
+# binary. Set INSTALL_CODEX=false for API-only, Worker, or CI images.
 RUN if [ "${INSTALL_CODEX}" = "true" ]; then \
         curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh; \
         HOME=/root sh /tmp/install-codex.sh; \
@@ -42,7 +42,7 @@ COPY . /app
 RUN python -m pip install --no-cache-dir -e '.[runtime]'
 
 RUN useradd --create-home --uid 10001 --shell /bin/sh researchagent \
-    && mkdir -p /data/runtime /data/research_runs /data/codex \
+    && mkdir -p /data/runtime /data/research_runs /data/codex /data/worker \
     && chown -R researchagent:researchagent /app /data \
     && install -m 0755 /app/deploy/entrypoint.sh /usr/local/bin/research-agent-entrypoint
 
@@ -53,7 +53,7 @@ ENV HOME=/home/researchagent \
     AGENT_SANDBOX_BACKEND=none \
     AGENT_ALLOW_UNSANDBOXED_GENERIC=false
 
-VOLUME ["/data/runtime", "/data/research_runs", "/data/codex"]
+VOLUME ["/data/runtime", "/data/research_runs", "/data/codex", "/data/worker"]
 USER researchagent
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \

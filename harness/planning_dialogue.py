@@ -1,21 +1,13 @@
 from __future__ import annotations
 
 import shlex
-import threading
 from pathlib import Path
 
 from harness.config import HarnessConfig
-from harness.multi_agent_types import AgentCommandExecutor, AgentInvocation
 from harness.planning import render_planning_scout
 from harness.process_manager import ProcessCancellationController
-from harness.provider_executor import build_provider_executor_class
+from harness.provider_runtime import ProviderAwareAgentCommandExecutor
 from harness.state import ResearchSession
-
-
-ProviderAwareAgentCommandExecutor = build_provider_executor_class(
-    AgentCommandExecutor,
-    AgentInvocation,
-)
 
 
 class PlanningDialogueRunner:
@@ -26,7 +18,7 @@ class PlanningDialogueRunner:
         )
         self.executor = ProviderAwareAgentCommandExecutor(
             config,
-            threading.RLock(),
+            __import__("threading").RLock(),
             self.cancellation,
         )
 

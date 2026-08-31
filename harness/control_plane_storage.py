@@ -76,6 +76,7 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         private_permissions(tmp)
         os.replace(tmp, path)
         private_permissions(path)
+        _fsync_directory(path.parent)
     finally:
         try:
             tmp.unlink(missing_ok=True)
@@ -88,6 +89,23 @@ def private_permissions(path: Path, *, directory: bool = False) -> None:
         path.chmod(0o700 if directory else 0o600)
     except OSError:
         pass
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a successful rename on filesystems that support directory fsync."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 @contextmanager

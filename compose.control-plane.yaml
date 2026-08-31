@@ -1,0 +1,24 @@
+services:
+  research-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.control-plane
+    platform: ${RESEARCH_AGENT_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PROJECT_ROOT: /workspace
+      CONTROL_PLANE_RUNTIME_ROOT: /runtime
+      CONTROL_PLANE_DATABASE: /runtime/control-plane.sqlite3
+      CONTROL_PLANE_PROJECTS_ROOT: /runtime/projects
+      CONTROL_PLANE_JOBS_ROOT: /runtime/jobs
+      KAGGLE_PACKAGES_ROOT: /runtime/kaggle/packages
+      KAGGLE_OUTPUTS_ROOT: /runtime/kaggle/outputs
+      CODEX_HOME: /home/research/.codex
+    volumes:
+      - ${RUNTIME_STATE_DIR:-./runtime/state}:/runtime
+      - ${CODEX_AUTH_DIR:-./runtime/codex}:/home/research/.codex
+    init: true
+    stop_grace_period: 30s
+    command: ["bot"]

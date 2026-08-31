@@ -36,7 +36,8 @@ def test_router_reads_control_plane_path_and_channel_map_from_environment(tmp_pa
     root = tmp_path / "custom-control-plane"
     router = DiscordThreadRouter.from_environment(
         environ={
-            "CONTROL_PLANE_DIR": str(root),
+            "PROJECT_ROOT": str(tmp_path),
+            "CONTROL_PLANE_DIR": "custom-control-plane",
             "DISCORD_RESEARCH_CHANNEL_IDS": "100",
         }
     )
@@ -176,6 +177,7 @@ def test_router_refuses_to_rebind_an_existing_conversation_to_another_domain(
         changed.resolve_work_session(location, title="Research")
 
 
+
 def test_concurrent_first_messages_reuse_the_canonical_thread_binding(tmp_path: Path):
     root = tmp_path / "control-plane"
     mapping = ChannelDomainMap({"200": Domain.KAGGLE})
@@ -206,7 +208,6 @@ def test_concurrent_first_messages_reuse_the_canonical_thread_binding(tmp_path: 
     )
     assert sum(event.event_type == "discord.route.bound" for event in events) == 1
     assert sum(event.event_type == "discord.message.received" for event in events) == 8
-
 
 def test_dispatcher_selects_handlers_only_from_channel_mapping(tmp_path: Path):
     router = _router(tmp_path)

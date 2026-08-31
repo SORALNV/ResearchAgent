@@ -135,6 +135,7 @@ def test_compute_broker_routes_by_domain_resources_and_availability():
             accelerators=("gpu",),
             domains=(Domain.KAGGLE,),
             gpu_count=1,
+            gpu_memory_mb=48000,
             labels=("training",),
         ),
     )

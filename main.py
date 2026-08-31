@@ -1,13 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from harness.command_parser import parse_research_command
 from harness.commands import Command, CommandContext
 from harness.config import HarnessConfig
+from harness.control_plane import ControlPlaneStore, Domain
 from harness.discord_adapter import FakeDiscordAdapter
+from harness.discord_thread_router import (
+    ChannelDomainMap,
+    DiscordChannelDispatcher,
+    DiscordThreadRouter,
+)
+from harness.domain_consultation import DomainConsultationHandler
 from harness.hardened_orchestrator import HardenedResearchOrchestrator
+from harness.routed_discord_adapter import (
+    DomainRoutedDiscordBotAdapter,
+    RoutedDiscordService,
+)
 from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
 
@@ -16,7 +28,40 @@ def build_orchestrator(
     research_archive_dir: Path | None = None,
 ) -> HardenedResearchOrchestrator:
     config = HarnessConfig.from_env(workdir, research_archive_dir)
-    return HardenedResearchOrchestrator(config=config, discord=FakeDiscordAdapter())
+    return HardenedResearchOrchestrator(
+        config=config,
+        discord=FakeDiscordAdapter(),
+    )
+
+
+def build_routed_discord_service(
+    config: HarnessConfig,
+) -> RoutedDiscordService:
+    control_plane_dir = Path(
+        os.getenv("CONTROL_PLANE_DIR", "control_plane")
+    ).expanduser()
+    if not control_plane_dir.is_absolute():
+        control_plane_dir = config.project_root / control_plane_dir
+    router = DiscordThreadRouter(
+        ControlPlaneStore(control_plane_dir),
+        ChannelDomainMap.from_environment(os.environ),
+    )
+    dispatcher = DiscordChannelDispatcher(
+        router,
+        {
+            Domain.RESEARCH: DomainConsultationHandler(
+                config,
+                router.store,
+                Domain.RESEARCH,
+            ),
+            Domain.KAGGLE: DomainConsultationHandler(
+                config,
+                router.store,
+                Domain.KAGGLE,
+            ),
+        },
+    )
+    return RoutedDiscordService(router, dispatcher)
 
 
 def _print_result(orchestrator: HardenedResearchOrchestrator, command: Command) -> None:
@@ -28,7 +73,11 @@ def _print_result(orchestrator: HardenedResearchOrchestrator, command: Command) 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ResearchAgent harness")
-    parser.add_argument("--workdir", default=".", help="Workspace for state, journal, and brief files.")
+    parser.add_argument(
+        "--workdir",
+        default=".",
+        help="Workspace for state, journal, and brief files.",
+    )
     parser.add_argument(
         "--research-archive-dir",
         default=None,
@@ -107,14 +156,26 @@ def main() -> None:
         token = args.token or config.discord_bot_token
         if not token:
             raise SystemExit("DISCORD_BOT_TOKEN or --token is required for the real bot.")
-        WorkerDiscordBotAdapter(
-            orchestrator_factory=lambda discord: HardenedResearchOrchestrator(config, discord=discord),
-            token=token,
-            channel_id=args.channel_id or config.discord_channel_id,
-            important_channel_id=config.discord_important_channel_id,
-            log_channel_id=config.discord_log_channel_id,
-            worker_queue_size=config.discord_worker_queue_size,
-        ).run()
+        if _domain_routing_is_configured():
+            service = build_routed_discord_service(config)
+            DomainRoutedDiscordBotAdapter(
+                token=token,
+                service=service,
+                create_threads=_bool_env("DISCORD_CREATE_THREADS", True),
+                log_channel_id=config.discord_log_channel_id,
+            ).run()
+        else:
+            WorkerDiscordBotAdapter(
+                orchestrator_factory=lambda discord: HardenedResearchOrchestrator(
+                    config,
+                    discord=discord,
+                ),
+                token=token,
+                channel_id=args.channel_id or config.discord_channel_id,
+                important_channel_id=config.discord_important_channel_id,
+                log_channel_id=config.discord_log_channel_id,
+                worker_queue_size=config.discord_worker_queue_size,
+            ).run()
         return
 
     orchestrator = build_orchestrator(workdir, research_archive_dir)
@@ -133,7 +194,9 @@ def main() -> None:
         elif action == "revise":
             command = parse_research_command(f"/re revise {args.gate_id} {args.reason}")
         elif action == "reject":
-            command = parse_research_command(f"/re reject {args.approval_id} {args.reason}")
+            command = parse_research_command(
+                f"/re reject {args.approval_id} {args.reason}"
+            )
         else:
             command = parse_research_command(f"/re {action}")
         _print_result(orchestrator, command)
@@ -158,7 +221,10 @@ def main() -> None:
     elif args.command == "reject":
         _print_result(
             orchestrator,
-            Command("reject", {"approval_id": args.approval_id, "reason": args.reason}),
+            Command(
+                "reject",
+                {"approval_id": args.approval_id, "reason": args.reason},
+            ),
         )
     elif args.command == "stop":
         _print_result(orchestrator, Command("stop"))
@@ -179,9 +245,31 @@ def main() -> None:
             "/re eval",
             "/re stop",
         ]:
-            result = fake.inject(orchestrator, content) if content.startswith("/") else fake.inject_message(orchestrator, content)
+            result = (
+                fake.inject(orchestrator, content)
+                if content.startswith("/")
+                else fake.inject_message(orchestrator, content)
+            )
             if result:
                 print(result.message)
+
+
+def _domain_routing_is_configured() -> bool:
+    return any(
+        os.getenv(name, "").strip()
+        for name in (
+            "DISCORD_CHANNEL_DOMAIN_MAP",
+            "DISCORD_RESEARCH_CHANNEL_IDS",
+            "DISCORD_KAGGLE_CHANNEL_IDS",
+        )
+    )
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 if __name__ == "__main__":

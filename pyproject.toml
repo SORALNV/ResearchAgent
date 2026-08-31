@@ -4,18 +4,36 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "research-agent-harness"
-version = "0.1.0"
-description = "MVP research harness with Discord control, planning gates, and mock agent runners."
+version = "0.2.0"
+description = "Portable ResearchAgent and KaggleAgent control plane with Discord threads and pluggable compute."
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
 discord = ["discord.py>=2.4"]
-test = ["pytest>=8.0"]
+api = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "httpx>=0.27"]
+computer = ["playwright>=1.50"]
+platform = [
+  "discord.py>=2.4",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "httpx>=0.27",
+]
+test = [
+  "pytest>=8.0",
+  "fastapi>=0.115",
+  "httpx>=0.27",
+]
+
+[project.scripts]
+research-agent-core = "harness.platform.api:main"
+research-agent-edge = "harness.platform.discord_edge:main"
+research-agent-worker = "harness.compute.worker_api:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 
-[tool.setuptools]
-packages = ["harness"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

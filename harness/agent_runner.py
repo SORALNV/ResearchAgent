@@ -8,8 +8,9 @@ from pathlib import Path
 from harness.approval import ProposedOperation
 from harness.config import HarnessConfig
 from harness.conversation import ConversationSession
-from harness.multi_agent_types import AgentCommandExecutor
+from harness.multi_agent_types import AgentCommandExecutor, AgentInvocation
 from harness.process_manager import ProcessCancellationController
+from harness.provider_executor import build_provider_executor_class
 from harness.state import ResearchSession
 
 
@@ -19,6 +20,11 @@ DEFAULT_PROMPTS = {
     "review": "subの結果に対して懸念、反証、追加確認を返す。",
     "fresh": "既出案と重複しない新規アイデアを返す。",
 }
+
+ProviderAwareAgentCommandExecutor = build_provider_executor_class(
+    AgentCommandExecutor,
+    AgentInvocation,
+)
 
 
 @dataclass
@@ -39,7 +45,7 @@ class RoundOutput:
 
 
 class MockAgentRunner:
-    """Compatibility facade: mock without commands, hardened real runner with commands."""
+    """Compatibility facade: deterministic mock or portable real runner."""
 
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
@@ -54,7 +60,7 @@ class MockAgentRunner:
                 config.claude_agent_command,
             )
         ):
-            from harness.multi_agent_runner import MultiAgentRunner
+            from harness.portable_multi_agent_runner import MultiAgentRunner
 
             self._real_runner = MultiAgentRunner(config)
 
@@ -78,19 +84,14 @@ class MockAgentRunner:
             ]
         )
         fresh = None
-        if (
-            self.config.fresh_interval > 0
-            and round_number % self.config.fresh_interval == 0
-        ):
+        if self.config.fresh_interval > 0 and round_number % self.config.fresh_interval == 0:
             fresh = (
                 f"Fresh stub: {self.prompts['fresh']} "
                 "実エージェント接続前に失敗時再開シナリオを試す。"
             )
         claude = None
         if round_number == 1:
-            claude = (
-                "Claude stub: 重要判断ではPLANNING承認と承認ゲートを分離する。"
-            )
+            claude = "Claude stub: 重要判断ではPLANNING承認と承認ゲートを分離する。"
         proposed_operation = None
         if round_number == 1:
             proposed_operation = ProposedOperation(
@@ -100,9 +101,7 @@ class MockAgentRunner:
                 dry_run_result="危険操作として検出。@Sora の /re approve が来るまで停止する。",
             )
         subtask = f"Mock sub-agent: {self.prompts['sub']}"
-        sub_agent_output = (
-            "Mock sub-agent output: 変更diffなし。E2E観点は満たせる見込み。"
-        )
+        sub_agent_output = "Mock sub-agent output: 変更diffなし。E2E観点は満たせる見込み。"
         return RoundOutput(
             main_agent_summary=(
                 f"{self.prompts['main']} {current_question} を分解し、"
@@ -112,8 +111,7 @@ class MockAgentRunner:
             sub_agent_output=sub_agent_output,
             review_output=(
                 f"Review stub: {self.prompts['review']} "
-                "/re start前にRESEARCHへ進まないこと、"
-                "承認なし危険操作を止めることを確認。"
+                "/re start前にRESEARCHへ進まないこと、承認なし危険操作を止めることを確認。"
             ),
             claude_consultation=claude,
             fresh_agent_output=fresh,
@@ -141,67 +139,54 @@ class MockAgentRunner:
         if self._real_runner is not None:
             self._real_runner.reset_cancellation()
 
+    def runtime_snapshot(self, session: ResearchSession) -> dict[str, object]:
+        if self._real_runner is None:
+            return {
+                "active_agents": 0,
+                "checkpoint_status": "mock",
+                "current_stage": "mock",
+                "completed_subtasks": 0,
+                "failed_subtasks": 0,
+                "total_subtasks": 0,
+            }
+        return self._real_runner.runtime_snapshot(session)
+
     def _load_prompts(self, prompt_dir: Path) -> dict[str, str]:
         prompts = dict(DEFAULT_PROMPTS)
         for role in prompts:
             path = prompt_dir / f"{role}.md"
             if path.exists():
-                prompts[role] = (
-                    path.read_text(encoding="utf-8").strip() or prompts[role]
-                )
+                prompts[role] = path.read_text(encoding="utf-8").strip() or prompts[role]
         return prompts
 
 
 class SubAgentCommandRunner:
-    """Backward-compatible direct runner using the same hardened executor."""
+    """Backward-compatible single-agent entry point using the same provider router."""
 
     def __init__(self, config: HarnessConfig) -> None:
         self.config = config
         self.cancellation = ProcessCancellationController(
             config.agent_cancel_grace_seconds
         )
-        self.executor = AgentCommandExecutor(
+        self.executor = ProviderAwareAgentCommandExecutor(
             config,
             threading.RLock(),
             self.cancellation,
         )
 
-    def run(
-        self,
-        session: ResearchSession,
-        round_number: int,
-        task: str,
-    ) -> str:
-        root = Path(session.research_dir or self.config.project_root)
-        workspace = (
-            root
-            / "artifacts"
-            / "agent_workspaces"
-            / f"R{round_number:03d}"
-            / "legacy-sub"
-            / "attempt-01"
-        )
-        workspace.mkdir(parents=True, exist_ok=True)
+    def run(self, session: ResearchSession, round_number: int, task: str) -> str:
         invocation = self.executor.run(
             session=session,
             role="sub",
             stage="legacy_sub_execute",
-            task_id="legacy-sub",
             prompt=self._build_prompt(session, round_number, task),
             command_text=self.config.sub_agent_command,
             sandbox="workspace-write",
-            working_dir=workspace,
+            working_dir=Path(session.research_dir or self.config.project_root),
         )
         return invocation.output
 
-    def cancel_active(self, reason: str = "legacy sub cancellation") -> int:
-        return self.cancellation.cancel(reason)
-
-    def reset_cancellation(self) -> None:
-        self.cancellation.reset()
-
     def _build_command(self, session: ResearchSession) -> list[str]:
-        """Compatibility preview used by existing callers and tests."""
         assert self.config.sub_agent_command is not None
         parts = shlex.split(self.config.sub_agent_command)
         executable = Path(parts[0]).name if parts else ""
@@ -230,10 +215,9 @@ class SubAgentCommandRunner:
 単一タスクだけを実行し、結果を構造化して返してください。
 
 制約:
-- 作業場所は割り当てられた専用workspace内に限定する
-- 共有研究フォルダは参照用とし、直接変更しない
+- 作業場所は研究フォルダ内に限定する: {session.research_dir}
 - ファイル削除、外部投稿、git push、秘密情報送信は禁止
-- sudo/chmod/chown、課金API呼び出しは禁止
+- sudo/chmod/chown、ファイル削除、外部投稿、git push、秘密情報送信、課金API呼び出しは禁止
 - 危険操作が必要なら実行せず、次の形式で1行だけ報告する:
   APPROVAL_REQUIRED: operation=<操作>; reason=<理由>; impact=<影響>; dry_run_result=<実行していない確認結果>
 - 大量ファイル生成や長時間コマンドが必要なら、その必要性を報告だけして実行しない
@@ -271,8 +255,7 @@ def parse_approval_required(text: str) -> ProposedOperation | None:
             reason=parts.get("reason", "SubAgentが承認必要操作を報告した。"),
             impact=parts.get("impact", "影響は未確認。MVPでは実行しない。"),
             dry_run_result=parts.get(
-                "dry_run_result",
-                "未実行。Discord承認待ちに変換した。",
+                "dry_run_result", "未実行。Discord承認待ちに変換した。"
             ),
         )
     return None

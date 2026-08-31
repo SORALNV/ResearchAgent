@@ -38,6 +38,9 @@ class ApprovalGate:
         "sudo",
         "chmod",
         "chown",
+        # GUI automation can cross trust boundaries and must always be explicit.
+        "openai_computer_use",
+        "openai_computer_safety",
         # Harness-internal fail-closed conditions.
         "agent_protocol_failure",
         "review_unresolved",

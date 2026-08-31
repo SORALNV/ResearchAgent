@@ -1,0 +1,15 @@
+name: research-agent-edge
+
+services:
+  edge:
+    build:
+      context: ..
+      target: edge
+    env_file:
+      - .env.edge
+    command: ["python", "-m", "harness.platform.discord_edge_portable"]
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    network_mode: host

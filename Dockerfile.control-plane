@@ -1,0 +1,50 @@
+FROM python:3.12-slim
+
+ARG TARGETARCH
+ARG CODEX_NPM_PACKAGE=@openai/codex
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PROJECT_ROOT=/workspace \
+    CONTROL_PLANE_RUNTIME_ROOT=/runtime \
+    CODEX_HOME=/home/research/.codex
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bubblewrap \
+        ca-certificates \
+        curl \
+        git \
+        nodejs \
+        npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global "${CODEX_NPM_PACKAGE}"
+
+RUN useradd --create-home --uid 10001 --shell /bin/bash research \
+    && mkdir -p \
+        /workspace \
+        /runtime/projects \
+        /runtime/jobs \
+        /runtime/kaggle/packages \
+        /runtime/kaggle/outputs \
+        /home/research/.codex \
+    && chown -R research:research /workspace /runtime /home/research
+
+WORKDIR /workspace
+COPY --chown=research:research . /workspace
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -e '.[runtime]' kaggle
+
+USER research
+
+VOLUME [
+  "/runtime",
+  "/home/research/.codex"
+]
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+  CMD python control_plane_main.py --workdir /workspace status >/tmp/health.json || exit 1
+
+ENTRYPOINT ["python", "control_plane_main.py", "--workdir", "/workspace"]
+CMD ["bot"]

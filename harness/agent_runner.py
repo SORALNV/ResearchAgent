@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import threading
 from dataclasses import dataclass
@@ -8,9 +9,8 @@ from pathlib import Path
 from harness.approval import ProposedOperation
 from harness.config import HarnessConfig
 from harness.conversation import ConversationSession
-from harness.multi_agent_types import AgentCommandExecutor, AgentInvocation
 from harness.process_manager import ProcessCancellationController
-from harness.provider_executor import build_provider_executor_class
+from harness.provider_runtime import ProviderAwareAgentCommandExecutor
 from harness.state import ResearchSession
 
 
@@ -21,9 +21,14 @@ DEFAULT_PROMPTS = {
     "fresh": "既出案と重複しない新規アイデアを返す。",
 }
 
-ProviderAwareAgentCommandExecutor = build_provider_executor_class(
-    AgentCommandExecutor,
-    AgentInvocation,
+_RUNTIME_ORDER_ENV_NAMES = (
+    "AGENT_RUNTIME_ORDER",
+    "MAIN_AGENT_RUNTIME_ORDER",
+    "SUB_AGENT_RUNTIME_ORDER",
+    "REVIEW_AGENT_RUNTIME_ORDER",
+    "FRESH_AGENT_RUNTIME_ORDER",
+    "PLANNING_AGENT_RUNTIME_ORDER",
+    "CLAUDE_AGENT_RUNTIME_ORDER",
 )
 
 
@@ -51,15 +56,7 @@ class MockAgentRunner:
         self.config = config
         self.prompts = self._load_prompts(config.project_root / "prompts")
         self._real_runner = None
-        if any(
-            (
-                config.main_agent_command,
-                config.sub_agent_command,
-                config.review_agent_command,
-                config.fresh_agent_command,
-                config.claude_agent_command,
-            )
-        ):
+        if _runtime_requested(config):
             from harness.portable_multi_agent_runner import MultiAgentRunner
 
             self._real_runner = MultiAgentRunner(config)
@@ -259,3 +256,16 @@ def parse_approval_required(text: str) -> ProposedOperation | None:
             ),
         )
     return None
+
+
+def _runtime_requested(config: HarnessConfig) -> bool:
+    commands = (
+        config.main_agent_command,
+        config.sub_agent_command,
+        config.review_agent_command,
+        config.fresh_agent_command,
+        config.claude_agent_command,
+    )
+    return any(commands) or any(
+        os.getenv(name, "").strip() for name in _RUNTIME_ORDER_ENV_NAMES
+    )

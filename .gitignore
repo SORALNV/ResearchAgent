@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!deploy/.env.worker.example
 state.json
 state.json.tmp
 sessions/

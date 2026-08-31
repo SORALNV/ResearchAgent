@@ -18,6 +18,7 @@ from harness.control_plane_storage import atomic_write_json, new_id, read_json
 from harness.control_plane_store_events import EventStore
 from harness.state import utc_timestamp
 
+
 class ControlPlaneStore(EventStore):
     """Claimable steering and aggregate work-session snapshots."""
 
@@ -180,14 +181,12 @@ class ControlPlaneStore(EventStore):
                 raise InvalidTransitionError(
                     f"steering is already terminal: {current.status.value}"
                 )
-            if (
-                current.status == SteeringStatus.CLAIMED
-                and consumer
-                and current.claimed_by != consumer
-            ):
-                raise ConflictError(
-                    f"steering is claimed by {current.claimed_by}, not {consumer}"
-                )
+            if current.status == SteeringStatus.CLAIMED:
+                if not consumer or current.claimed_by != consumer:
+                    raise ConflictError(
+                        f"steering is claimed by {current.claimed_by}, "
+                        f"not {consumer or 'an unspecified consumer'}"
+                    )
             updated = replace(
                 current,
                 status=target,
@@ -226,4 +225,3 @@ class ControlPlaneStore(EventStore):
             "pending_steering": [item.to_dict() for item in pending],
             "events": [item.to_dict() for item in events],
         }
-

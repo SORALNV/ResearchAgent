@@ -42,6 +42,7 @@ jobs:
       - name: Validate Compose contracts
         env:
           WORKER_TOKEN: ci-worker-token
+          LOCAL_GPU_WORKER_TOKEN: ci-local-gpu-worker-token
         run: |
           cp .env.example .env
           docker compose -f compose.yaml config >/dev/null

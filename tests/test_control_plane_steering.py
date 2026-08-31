@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -11,15 +9,11 @@ from harness.control_plane import (
     ControlPlaneStore,
     Domain,
     EventLane,
-    InvalidTransitionError,
     JobSpec,
-    JobStatus,
-    ProjectStatus,
     ResourceRequirements,
     SteeringApplyPolicy,
     SteeringKind,
     SteeringStatus,
-    WorkSessionStatus,
 )
 
 
@@ -91,6 +85,11 @@ def test_steering_defaults_claim_and_resolution(tmp_path):
         SteeringStatus.CLAIMED,
         SteeringStatus.CLAIMED,
     ]
+    with pytest.raises(ConflictError):
+        store.resolve_steering(
+            claimed[0].steering_id,
+            SteeringStatus.APPLIED,
+        )
     applied = store.resolve_steering(
         claimed[0].steering_id,
         SteeringStatus.APPLIED,
@@ -141,4 +140,3 @@ def test_steering_idempotency_and_source_scope(tmp_path):
             text="bad scope",
             source_event_id=event.event_id,
         )
-

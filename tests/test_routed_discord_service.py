@@ -231,7 +231,10 @@ def test_human_decision_commands_drive_exact_domain_gates(tmp_path: Path):
     assert exact.event_id == decision.event_id
     assert reply.work_session_id == decision.work_session_id
 
-    with pytest.raises(ValueError, match="only valid in research"):
+    with pytest.raises(
+        ValueError,
+        match="is not a human decision in kaggle mode",
+    ):
         service.record_decision(
             location,
             title="Kaggle",
@@ -261,12 +264,12 @@ def test_research_paper_and_result_interpretation_remain_human_only(
     for kind, action, subject in (
         (
             HumanDecisionKind.RESULT_INTERPRETATION,
-            ControlledAction.ADOPT_RESULT,
+            ControlledAction.CONTINUE_FROM_RESULT,
             "result:R1",
         ),
         (
             HumanDecisionKind.RESEARCH_PAPER,
-            ControlledAction.START_RESEARCH_PAPER,
+            ControlledAction.START_PAPER_DRAFT,
             "result-bundle:R1",
         ),
     ):
@@ -342,7 +345,7 @@ def test_status_exposes_mode_and_only_three_human_direction_decisions(
     assert "mode: kaggle" in status
     assert "hypothesis: accept (hypothesis:H1)" in status
     assert status.count("\n- ") >= 3
-    assert "Kaggleへの最終提出判断" in status
+    assert "提出してよいかの最終判断" in status
     assert "論文としてまとめるかの判断" not in status
 
 

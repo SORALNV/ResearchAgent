@@ -154,9 +154,9 @@ Controlled action names for `/agent gate` are:
 
 ```text
 start_experiment
-adopt_result
+continue_from_result
 submit_kaggle
-start_research_paper
+start_paper_draft
 ```
 
 The gate API is also callable by future Compute Broker, Kaggle submission, and

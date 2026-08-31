@@ -1,0 +1,33 @@
+name: research-agent-worker
+
+services:
+  worker:
+    build:
+      context: ..
+      target: worker
+    env_file:
+      - .env.worker
+    command: ["python", "-m", "harness.compute.worker_api_portable"]
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${WORKER_BIND_ADDRESS:-127.0.0.1}:${WORKER_PORT:-8090}:8090"
+    volumes:
+      - worker-data:/var/lib/research-agent
+    networks: [research-worker]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3)); assert d.get('ok')"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    # On an NVIDIA GPU host, use deploy/compose.worker-gpu.yaml as an overlay.
+
+networks:
+  research-worker:
+    driver: bridge
+
+volumes:
+  worker-data:

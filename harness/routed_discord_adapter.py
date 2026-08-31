@@ -299,6 +299,12 @@ class DomainRoutedDiscordBotAdapter:
                 )
             return location
 
+        def require_human(interaction) -> None:
+            if bool(getattr(interaction.user, "bot", False)):
+                raise PermissionError(
+                    "human-authenticated Discord user is required"
+                )
+
         @client.event
         async def on_message(message) -> None:
             if (
@@ -413,6 +419,7 @@ class DomainRoutedDiscordBotAdapter:
         ) -> None:
             await interaction.response.defer(thinking=True)
             try:
+                require_human(interaction)
                 location = interaction_location(
                     interaction,
                     require_thread=True,
@@ -427,9 +434,7 @@ class DomainRoutedDiscordBotAdapter:
                     note=note,
                     actor_id=str(interaction.user.id),
                     message_id=str(interaction.id),
-                    actor_is_human=not bool(
-                        getattr(interaction.user, "bot", False)
-                    ),
+                    actor_is_human=True,
                 )
                 await reply(
                     interaction,
@@ -565,6 +570,118 @@ class DomainRoutedDiscordBotAdapter:
                     f"gate check failed: {type(exc).__name__}: {exc}",
                 )
 
+        @agent.command(
+            name="compute_backends",
+            description="利用可能なCompute Backendと能力を表示します。",
+        )
+        async def compute_backends(interaction) -> None:
+            await interaction.response.defer(thinking=True)
+            try:
+                compute = getattr(self.service, "compute", None)
+                broker = getattr(compute, "broker", None)
+                if broker is None:
+                    raise RuntimeError("autonomous compute is not enabled")
+                snapshot = await asyncio.to_thread(broker.snapshot)
+                lines = ["Compute Backends:"]
+                for name, state in snapshot.items():
+                    capabilities = state.get("capabilities") or {}
+                    lines.append(
+                        "- "
+                        + str(name)
+                        + ": available="
+                        + str(bool(state.get("available")))
+                        + "; approval_required="
+                        + str(bool(state.get("approval_required")))
+                        + "; accelerators="
+                        + ",".join(capabilities.get("accelerators") or [])
+                        + "; gpu_count="
+                        + str(capabilities.get("gpu_count") or 0)
+                        + "; detail="
+                        + str(state.get("detail") or "")
+                    )
+                await reply(interaction, "\n".join(lines))
+            except Exception as exc:
+                await reply(
+                    interaction,
+                    f"backend status failed: {type(exc).__name__}: {exc}",
+                )
+
+        @agent.command(
+            name="approve_compute",
+            description="課金等で承認待ちのCompute Jobを許可します。",
+        )
+        async def approve_compute(interaction, job_id: str) -> None:
+            await interaction.response.defer(thinking=True)
+            try:
+                require_human(interaction)
+                method = getattr(self.service, "approve_compute", None)
+                if not callable(method):
+                    raise RuntimeError("compute approval is not enabled")
+                location = interaction_location(
+                    interaction,
+                    require_thread=True,
+                )
+                job = await asyncio.to_thread(
+                    method,
+                    location,
+                    title=f"Discord WorkSession {location.conversation_id}",
+                    job_id=job_id,
+                    actor_id=str(interaction.user.id),
+                )
+                await reply(
+                    interaction,
+                    "\n".join(
+                        [
+                            f"compute approved: {job.job_id}",
+                            f"status: {job.status.value}",
+                            f"backend: {job.backend_id or '-'}",
+                        ]
+                    ),
+                )
+            except Exception as exc:
+                await reply(
+                    interaction,
+                    f"compute approval failed: {type(exc).__name__}: {exc}",
+                )
+
+        @agent.command(
+            name="cancel_job",
+            description="このWorkSessionのCompute Jobを停止します。",
+        )
+        async def cancel_job(interaction, job_id: str) -> None:
+            await interaction.response.defer(thinking=True)
+            try:
+                require_human(interaction)
+                method = getattr(self.service, "cancel_compute", None)
+                if not callable(method):
+                    raise RuntimeError("compute cancellation is not enabled")
+                location = interaction_location(
+                    interaction,
+                    require_thread=True,
+                )
+                job = await asyncio.to_thread(
+                    method,
+                    location,
+                    title=f"Discord WorkSession {location.conversation_id}",
+                    job_id=job_id,
+                    actor_id=str(interaction.user.id),
+                )
+                await reply(
+                    interaction,
+                    "\n".join(
+                        [
+                            f"compute cancellation recorded: {job.job_id}",
+                            f"status: {job.status.value}",
+                            f"backend: {job.backend_id or '-'}",
+                        ]
+                    ),
+                )
+            except Exception as exc:
+                await reply(
+                    interaction,
+                    f"compute cancellation failed: {type(exc).__name__}: {exc}",
+                )
+
         tree.add_command(agent)
 
         @client.event
@@ -607,6 +724,7 @@ def _parse_verdict(value: str) -> HumanDecisionVerdict:
         "pending": "defer",
     }
     return HumanDecisionVerdict(aliases.get(normalized, normalized))
+
 
 def _latest_decisions(
     route: DiscordThreadRoute,

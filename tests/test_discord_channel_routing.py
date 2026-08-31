@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -173,6 +174,38 @@ def test_router_refuses_to_rebind_an_existing_conversation_to_another_domain(
     )
     with pytest.raises(ConflictError, match="already bound"):
         changed.resolve_work_session(location, title="Research")
+
+
+def test_concurrent_first_messages_reuse_the_canonical_thread_binding(tmp_path: Path):
+    root = tmp_path / "control-plane"
+    mapping = ChannelDomainMap({"200": Domain.KAGGLE})
+    routers = [
+        DiscordThreadRouter(ControlPlaneStore(root), mapping)
+        for _ in range(8)
+    ]
+    location = _kaggle_location()
+
+    def ingest(index: int):
+        return routers[index].ingest_message(
+            location,
+            message_id=str(2000 + index),
+            actor_id=str(40 + index),
+            text=f"message {index}",
+            title="Concurrent Kaggle thread",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(ingest, range(8)))
+
+    session_ids = {item.route.work_session.work_session_id for item in results}
+    assert len(session_ids) == 1
+    assert len(routers[0].store.list_work_sessions()) == 1
+    events = routers[0].store.list_events(
+        work_session_id=next(iter(session_ids)),
+        limit=20,
+    )
+    assert sum(event.event_type == "discord.route.bound" for event in events) == 1
+    assert sum(event.event_type == "discord.message.received" for event in events) == 8
 
 
 def test_dispatcher_selects_handlers_only_from_channel_mapping(tmp_path: Path):

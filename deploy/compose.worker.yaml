@@ -9,13 +9,28 @@ services:
         INSTALL_CODEX: "false"
     image: ${RESEARCH_AGENT_IMAGE:-research-agent:local}
     restart: unless-stopped
-    env_file:
-      - ../.env
     environment:
       RESEARCH_AGENT_ROLE: worker
+      WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
       WORKER_HOST: 0.0.0.0
       WORKER_PORT: 8090
+      WORKER_PUBLIC_URL: ${WORKER_PUBLIC_URL:-}
       WORKER_DATA_DIR: /data/worker
+      WORKER_ACCELERATORS: ${WORKER_ACCELERATORS:-cpu}
+      WORKER_DOMAINS: ${WORKER_DOMAINS:-research,kaggle}
+      WORKER_GPU_COUNT: ${WORKER_GPU_COUNT:-0}
+      WORKER_GPU_MEMORY_MB: ${WORKER_GPU_MEMORY_MB:-}
+      WORKER_CPU_CORES: ${WORKER_CPU_CORES:-}
+      WORKER_MEMORY_MB: ${WORKER_MEMORY_MB:-}
+      WORKER_STORAGE_MB: ${WORKER_STORAGE_MB:-}
+      WORKER_NETWORK_AVAILABLE: ${WORKER_NETWORK_AVAILABLE:-true}
+      WORKER_LABELS: ${WORKER_LABELS:-training,inference,remote_worker,smoke_test}
+      WORKER_MAX_BUNDLE_FILES: ${WORKER_MAX_BUNDLE_FILES:-5000}
+      WORKER_MAX_BUNDLE_BYTES: ${WORKER_MAX_BUNDLE_BYTES:-67108864}
+      WORKER_ARTIFACT_MAX_FILES: ${WORKER_ARTIFACT_MAX_FILES:-2000}
+      WORKER_ARTIFACT_MAX_BYTES: ${WORKER_ARTIFACT_MAX_BYTES:-4294967296}
+      WORKER_MAX_REQUEST_BYTES: ${WORKER_MAX_REQUEST_BYTES:-100663296}
+      WORKER_HTTP_LOG: ${WORKER_HTTP_LOG:-true}
       CONTAINER_PRINT_PLATFORM: ${CONTAINER_PRINT_PLATFORM:-true}
     command:
       - python
@@ -39,4 +54,14 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5).read()"
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
     stop_grace_period: 45s

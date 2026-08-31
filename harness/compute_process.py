@@ -18,10 +18,10 @@ _CHILD: subprocess.Popen[bytes] | None = None
 def run_spec(spec_path: str | Path) -> int:
     """Execute one argv command and atomically persist its exit status.
 
-    The wrapper is started in its own process group by the backend. The child
-    remains in that group, so cancellation can terminate the complete tree. The
-    exit marker lets a restarted Core distinguish a finished process from a lost
-    in-memory ``Popen`` handle.
+    The wrapper itself is started in a dedicated process group by the backend.
+    Its experiment child is started in another process group so timeout and
+    signal handling can terminate the complete child tree before the wrapper
+    writes the durable exit marker.
     """
 
     global _CHILD
@@ -51,6 +51,10 @@ def run_spec(spec_path: str | Path) -> int:
             cwd=cwd,
             env=dict(os.environ),
             stdin=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            ),
         )
         try:
             returncode = _CHILD.wait(timeout=timeout)
@@ -87,10 +91,37 @@ def _terminate_child() -> None:
     child = _CHILD
     if child is None or child.poll() is not None:
         return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(child.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                child.kill()
+            except OSError:
+                pass
+        return
     try:
-        child.terminate()
+        os.killpg(child.pid, signal.SIGTERM)
+    except OSError:
+        try:
+            child.terminate()
+        except OSError:
+            return
+    try:
         child.wait(timeout=3)
-    except (OSError, subprocess.TimeoutExpired):
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except OSError:
         try:
             child.kill()
         except OSError:

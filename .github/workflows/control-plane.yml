@@ -1,0 +1,86 @@
+name: control-plane
+
+on:
+  pull_request:
+    paths:
+      - "harness/**"
+      - "tests/**"
+      - "control_plane_main.py"
+      - "Dockerfile.control-plane"
+      - "compose.control-plane.yaml"
+      - ".env.control-plane.example"
+      - ".github/workflows/control-plane.yml"
+  push:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - "tests/**"
+      - "control_plane_main.py"
+      - "Dockerfile.control-plane"
+      - "compose.control-plane.yaml"
+      - ".env.control-plane.example"
+      - ".github/workflows/control-plane.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  control-plane-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: python -m pip install -e '.[test]'
+      - name: Compile
+        run: python -m compileall -q harness main.py control_plane_main.py
+      - name: Test
+        run: pytest -q
+      - name: Credential-free control-plane demo
+        env:
+          ENABLE_FAKE_COMPUTE_BACKEND: "true"
+          ENABLE_KAGGLE_NOTEBOOK_BACKEND: "false"
+          ENABLE_LOCAL_CPU_BACKEND: "false"
+        run: python control_plane_main.py --workdir /tmp/research-agent-control demo --domain kaggle --title "CI demo"
+
+  container-amd64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build linux/amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.control-plane
+          platforms: linux/amd64
+          push: false
+          tags: research-agent-control:ci-amd64
+          cache-from: type=gha,scope=control-amd64
+          cache-to: type=gha,mode=max,scope=control-amd64
+
+  container-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build linux/arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.control-plane
+          platforms: linux/arm64
+          push: false
+          tags: research-agent-control:ci-arm64
+          cache-from: type=gha,scope=control-arm64
+          cache-to: type=gha,mode=max,scope=control-arm64

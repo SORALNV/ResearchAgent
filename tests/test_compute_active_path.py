@@ -39,6 +39,27 @@ def test_core_process_backends_require_explicit_trusted_opt_in(
     assert "local_cpu" in service.compute.broker.backends
 
 
+def test_kaggle_capacity_is_declared_from_environment(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("DISCORD_KAGGLE_CHANNEL_IDS", "200")
+    monkeypatch.setenv("CONTROL_PLANE_DIR", str(tmp_path / "control-kaggle"))
+    monkeypatch.setenv("KAGGLE_GPU_COUNT", "1")
+    monkeypatch.setenv("KAGGLE_GPU_MEMORY_MB", "16384")
+    monkeypatch.setenv("KAGGLE_CPU_CORES", "4")
+    monkeypatch.setenv("KAGGLE_MEMORY_MB", "32768")
+    monkeypatch.setenv("KAGGLE_STORAGE_MB", "100000")
+
+    service = build_routed_discord_service(HarnessConfig(project_root=tmp_path))
+    capabilities = service.compute.broker.backends["kaggle_notebook"].capabilities
+    assert capabilities.gpu_count == 1
+    assert capabilities.gpu_memory_mb == 16384
+    assert capabilities.cpu_cores == 4
+    assert capabilities.memory_mb == 32768
+    assert capabilities.ephemeral_storage_mb == 100000
+
+
 def test_local_gpu_compose_uses_secret_minimal_worker_sidecar():
     overlay = Path("compose.local-gpu.yaml").read_text(encoding="utf-8")
     assert "local-gpu-worker:" in overlay

@@ -5,8 +5,9 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import urllib.parse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,7 +33,7 @@ class WorkerJobRecord:
     workspace: str
     artifacts_dir: str
     collected: bool = False
-    updated_at: str = utc_timestamp()
+    updated_at: str = field(default_factory=utc_timestamp)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,176 +94,187 @@ class PortableComputeWorker:
             max_storage_mb=self.capabilities.ephemeral_storage_mb,
         )
         self.backend.capabilities = self.capabilities
+        self._lock = threading.RLock()
         self.records: dict[str, WorkerJobRecord] = {}
         self._load_existing()
 
     def health(self) -> dict[str, Any]:
-        return {
-            "ok": True,
-            "detail": "ResearchAgent portable compute worker",
-            "capabilities": self.capabilities.to_dict(),
-            "jobs": len(self.records),
-            "active_jobs": sorted(
-                job_id
-                for job_id, record in self.records.items()
-                if not record.handle.terminal
-            ),
-        }
+        with self._lock:
+            return {
+                "ok": True,
+                "detail": "ResearchAgent portable compute worker",
+                "capabilities": self.capabilities.to_dict(),
+                "jobs": len(self.records),
+                "active_jobs": sorted(
+                    job_id
+                    for job_id, record in self.records.items()
+                    if not record.handle.terminal
+                ),
+            }
 
     def submit(self, body: Mapping[str, Any]) -> dict[str, Any]:
-        raw_job = body.get("job")
-        if not isinstance(raw_job, Mapping):
-            raise ValueError("job must be an object")
-        job = Job.from_dict(raw_job)
-        existing = self.records.get(job.job_id)
-        if existing is not None:
-            return self._status_payload(existing)
-        supported, reasons = self.capabilities.satisfies(job.spec)
-        if not supported:
-            raise ValueError("worker capability mismatch: " + "; ".join(reasons))
-        bundle = body.get("source_bundle")
-        if not isinstance(bundle, dict):
-            raise ValueError("source_bundle is required")
+        with self._lock:
+            raw_job = body.get("job")
+            if not isinstance(raw_job, Mapping):
+                raise ValueError("job must be an object")
+            job = Job.from_dict(raw_job)
+            existing = self.records.get(job.job_id)
+            if existing is not None:
+                return self._status_payload(existing)
+            supported, reasons = self.capabilities.satisfies(job.spec)
+            if not supported:
+                raise ValueError("worker capability mismatch: " + "; ".join(reasons))
+            bundle = body.get("source_bundle")
+            if not isinstance(bundle, dict):
+                raise ValueError("source_bundle is required")
 
-        root = self.jobs_dir / _safe_component(job.job_id)
-        workspace = root / "workspace"
-        artifacts = root / "artifacts"
-        workspace.mkdir(parents=True, exist_ok=True)
-        artifacts.mkdir(parents=True, exist_ok=True)
-        bundle_result = extract_source_bundle(
-            bundle,
-            workspace,
-            max_files=self.max_bundle_files,
-            max_bytes=self.max_bundle_bytes,
-        )
-        payload = {
-            **job.spec.payload,
-            "workspace": str(workspace),
-            "source_bundle": bundle_result,
-        }
-        effective = replace(job, spec=replace(job.spec, payload=payload))
-        handle = self.backend.submit(effective, workspace)
-        record = WorkerJobRecord(
-            job=effective,
-            handle=handle,
-            workspace=str(workspace),
-            artifacts_dir=str(artifacts),
-            updated_at=utc_timestamp(),
-        )
-        self._save(record)
-        return self._status_payload(record)
-
-    def status(self, job_id: str) -> dict[str, Any]:
-        record = self._require(job_id)
-        if not record.handle.terminal:
-            handle = self.backend.poll(record.job, record.handle)
-            record = replace(record, handle=handle, updated_at=utc_timestamp())
-            self._save(record)
-        return self._status_payload(record)
-
-    def cancel(self, job_id: str) -> dict[str, Any]:
-        record = self._require(job_id)
-        handle = self.backend.cancel(record.job, record.handle)
-        record = replace(record, handle=handle, updated_at=utc_timestamp())
-        self._save(record)
-        return self._status_payload(record)
-
-    def collect(self, job_id: str) -> dict[str, Any]:
-        self.status(job_id)
-        record = self._require(job_id)
-        if record.handle.state != BackendState.SUCCEEDED:
-            raise ValueError(
-                f"job is not successful: {job_id} ({record.handle.state.value})"
+            root = self.jobs_dir / _safe_component(job.job_id)
+            workspace = root / "workspace"
+            artifacts = root / "artifacts"
+            workspace.mkdir(parents=True, exist_ok=True)
+            artifacts.mkdir(parents=True, exist_ok=True)
+            bundle_result = extract_source_bundle(
+                bundle,
+                workspace,
+                max_files=self.max_bundle_files,
+                max_bytes=self.max_bundle_bytes,
             )
-        artifacts = Path(record.artifacts_dir).expanduser().resolve()
-        if not record.collected:
-            collected = self.backend.collect(
-                record.job,
-                record.handle,
-                artifacts,
-            )
-            manifest, warnings = build_artifact_manifest(
-                artifacts,
-                max_files=self.artifact_max_files,
-                max_bytes=self.artifact_max_bytes,
-            )
-            record = replace(
-                record,
-                handle=replace(
-                    record.handle,
-                    result=collected.result or record.handle.result,
-                    metadata={
-                        **record.handle.metadata,
-                        "collection": {
-                            "artifact_paths": list(collected.artifact_paths),
-                            "warnings": [*collected.warnings, *warnings],
-                        },
-                    },
-                ),
-                collected=True,
+            payload = {
+                **job.spec.payload,
+                "workspace": str(workspace),
+                "source_bundle": bundle_result,
+            }
+            effective = replace(job, spec=replace(job.spec, payload=payload))
+            handle = self.backend.submit(effective, workspace)
+            record = WorkerJobRecord(
+                job=effective,
+                handle=handle,
+                workspace=str(workspace),
+                artifacts_dir=str(artifacts),
                 updated_at=utc_timestamp(),
             )
             self._save(record)
-        return {
-            **self._status_payload(record),
-            "artifacts": self.artifact_manifest(job_id),
-        }
+            return self._status_payload(record)
+
+    def status(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            record = self._require(job_id)
+            if not record.handle.terminal:
+                handle = self.backend.poll(record.job, record.handle)
+                record = replace(record, handle=handle, updated_at=utc_timestamp())
+                self._save(record)
+            return self._status_payload(record)
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            record = self._require(job_id)
+            handle = self.backend.cancel(record.job, record.handle)
+            record = replace(record, handle=handle, updated_at=utc_timestamp())
+            self._save(record)
+            return self._status_payload(record)
+
+    def collect(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            self.status(job_id)
+            record = self._require(job_id)
+            if record.handle.state != BackendState.SUCCEEDED:
+                raise ValueError(
+                    f"job is not successful: {job_id} ({record.handle.state.value})"
+                )
+            artifacts = Path(record.artifacts_dir).expanduser().resolve()
+            if not record.collected:
+                collected = self.backend.collect(
+                    record.job,
+                    record.handle,
+                    artifacts,
+                )
+                manifest, warnings = build_artifact_manifest(
+                    artifacts,
+                    max_files=self.artifact_max_files,
+                    max_bytes=self.artifact_max_bytes,
+                )
+                record = replace(
+                    record,
+                    handle=replace(
+                        record.handle,
+                        result=collected.result or record.handle.result,
+                        metadata={
+                            **record.handle.metadata,
+                            "collection": {
+                                "artifact_paths": list(collected.artifact_paths),
+                                "warnings": [*collected.warnings, *warnings],
+                            },
+                        },
+                    ),
+                    collected=True,
+                    updated_at=utc_timestamp(),
+                )
+                self._save(record)
+            return {
+                **self._status_payload(record),
+                "artifacts": self.artifact_manifest(job_id),
+            }
 
     def artifact_manifest(self, job_id: str) -> list[dict[str, Any]]:
-        root = Path(self._require(job_id).artifacts_dir).expanduser().resolve()
-        records: list[dict[str, Any]] = []
-        for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-            if path.is_symlink() or not path.is_file():
-                continue
-            relative = path.relative_to(root).as_posix()
-            download_path = f"/v1/jobs/{job_id}/artifacts/{relative}"
-            records.append(
-                {
-                    "path": relative,
-                    "size_bytes": path.stat().st_size,
-                    "sha256": _sha256(path),
-                    "download_path": download_path,
-                    "url": self.public_url + download_path
-                    if self.public_url
-                    else download_path,
-                }
-            )
-        return records
+        with self._lock:
+            root = Path(self._require(job_id).artifacts_dir).expanduser().resolve()
+            records: list[dict[str, Any]] = []
+            for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                relative = path.relative_to(root).as_posix()
+                download_path = f"/v1/jobs/{job_id}/artifacts/{relative}"
+                records.append(
+                    {
+                        "path": relative,
+                        "size_bytes": path.stat().st_size,
+                        "sha256": _sha256(path),
+                        "download_path": download_path,
+                        "url": self.public_url + download_path
+                        if self.public_url
+                        else download_path,
+                    }
+                )
+            return records
 
     def artifact_path(self, job_id: str, relative: str) -> Path:
-        safe = safe_relative_path(relative)
-        if not safe:
-            raise FileNotFoundError(relative)
-        root = Path(self._require(job_id).artifacts_dir).expanduser().resolve()
-        target = (root / safe).resolve()
-        try:
-            target.relative_to(root)
-        except ValueError as exc:
-            raise FileNotFoundError(relative) from exc
-        if target.is_symlink() or not target.is_file():
-            raise FileNotFoundError(relative)
-        return target
+        with self._lock:
+            safe = safe_relative_path(relative)
+            if not safe:
+                raise FileNotFoundError(relative)
+            root = Path(self._require(job_id).artifacts_dir).expanduser().resolve()
+            target = (root / safe).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise FileNotFoundError(relative) from exc
+            if target.is_symlink() or not target.is_file():
+                raise FileNotFoundError(relative)
+            return target
 
     def _load_existing(self) -> None:
-        for state in self.jobs_dir.glob("*/state.json"):
-            try:
-                value = json.loads(state.read_text(encoding="utf-8"))
-                if isinstance(value, Mapping):
-                    record = WorkerJobRecord.from_dict(value)
-                    self.records[record.job.job_id] = record
-            except Exception:
-                continue
+        with self._lock:
+            for state in self.jobs_dir.glob("*/state.json"):
+                try:
+                    value = json.loads(state.read_text(encoding="utf-8"))
+                    if isinstance(value, Mapping):
+                        record = WorkerJobRecord.from_dict(value)
+                        self.records[record.job.job_id] = record
+                except Exception:
+                    continue
 
     def _save(self, record: WorkerJobRecord) -> None:
-        self.records[record.job.job_id] = record
-        root = self.jobs_dir / _safe_component(record.job.job_id)
-        _atomic_json(root / "state.json", record.to_dict())
+        with self._lock:
+            self.records[record.job.job_id] = record
+            root = self.jobs_dir / _safe_component(record.job.job_id)
+            _atomic_json(root / "state.json", record.to_dict())
 
     def _require(self, job_id: str) -> WorkerJobRecord:
-        try:
-            return self.records[job_id]
-        except KeyError as exc:
-            raise KeyError(f"unknown worker job: {job_id}") from exc
+        with self._lock:
+            try:
+                return self.records[job_id]
+            except KeyError as exc:
+                raise KeyError(f"unknown worker job: {job_id}") from exc
 
     @staticmethod
     def _status_payload(record: WorkerJobRecord) -> dict[str, Any]:

@@ -6,16 +6,18 @@ from pathlib import Path
 
 from harness.command_parser import parse_research_command
 from harness.commands import Command, CommandContext
-from harness.compute_discord import (
-    AutonomousRoutedDiscordService,
-    build_autonomous_routed_service,
-)
 from harness.compute_models import BackendCapabilities
 from harness.config import HarnessConfig
 from harness.control_plane import ControlPlaneStore
 from harness.discord_adapter import FakeDiscordAdapter
 from harness.discord_thread_router import ChannelDomainMap, DiscordThreadRouter
+from harness.final_actions import (
+    CompleteRoutedDiscordService,
+    build_complete_routed_service,
+)
 from harness.hardened_orchestrator import HardenedResearchOrchestrator
+from harness.kaggle_cli_transport import current_kaggle_transport_from_env
+from harness.kaggle_submission import build_kaggle_submission_pipeline
 from harness.routed_discord_adapter import DomainRoutedDiscordBotAdapter
 from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
@@ -33,7 +35,7 @@ def build_orchestrator(
 
 def build_routed_discord_service(
     config: HarnessConfig,
-) -> AutonomousRoutedDiscordService:
+) -> CompleteRoutedDiscordService:
     control_plane_dir = Path(
         os.getenv("CONTROL_PLANE_DIR", "control_plane")
     ).expanduser()
@@ -43,7 +45,16 @@ def build_routed_discord_service(
         ControlPlaneStore(control_plane_dir),
         ChannelDomainMap.from_environment(os.environ),
     )
-    service = build_autonomous_routed_service(config, router)
+    submission = build_kaggle_submission_pipeline(
+        router=router,
+        project_root=config.project_root,
+        transport=current_kaggle_transport_from_env(),
+    )
+    service = build_complete_routed_service(
+        config,
+        router,
+        submission=submission,
+    )
     _configure_kaggle_backend_capabilities(service)
     if not _bool_env("LOCAL_PROCESS_COMPUTE_ENABLED", False):
         # AI-generated experiments must not share the Core process namespace by
@@ -56,7 +67,7 @@ def build_routed_discord_service(
 
 
 def _configure_kaggle_backend_capabilities(
-    service: AutonomousRoutedDiscordService,
+    service: CompleteRoutedDiscordService,
 ) -> None:
     backend = service.compute.broker.backends.get("kaggle_notebook")
     if backend is None:

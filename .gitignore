@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 !deploy/.env.worker.example
+!deploy/.env.final-actions.example
 state.json
 state.json.tmp
 sessions/
@@ -10,6 +11,8 @@ runtime/
 control_plane/
 discord_work_sessions/
 compute_runtime/
+final_actions/
+paper_outputs/
 worker-runtime/
 __pycache__/
 .pytest_cache/

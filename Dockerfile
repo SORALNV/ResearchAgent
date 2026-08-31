@@ -39,7 +39,8 @@ RUN if [ "${INSTALL_CODEX}" = "true" ]; then \
 
 WORKDIR /app
 COPY . /app
-RUN python -m pip install --no-cache-dir -e '.[runtime]'
+RUN python -m pip install --no-cache-dir -e '.[runtime]' \
+    && kaggle --help >/dev/null
 
 RUN useradd --create-home --uid 10001 --shell /bin/sh researchagent \
     && mkdir -p /data/runtime /data/research_runs /data/codex /data/worker \

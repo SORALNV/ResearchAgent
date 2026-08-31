@@ -11,6 +11,8 @@ runtime
 research_runs
 control_plane
 discord_work_sessions
+compute_runtime
+worker-runtime
 sessions
 artifacts
 *.log

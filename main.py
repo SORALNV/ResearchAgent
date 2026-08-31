@@ -6,20 +6,16 @@ from pathlib import Path
 
 from harness.command_parser import parse_research_command
 from harness.commands import Command, CommandContext
+from harness.compute_discord import (
+    AutonomousRoutedDiscordService,
+    build_autonomous_routed_service,
+)
 from harness.config import HarnessConfig
-from harness.control_plane import ControlPlaneStore, Domain
+from harness.control_plane import ControlPlaneStore
 from harness.discord_adapter import FakeDiscordAdapter
-from harness.discord_thread_router import (
-    ChannelDomainMap,
-    DiscordChannelDispatcher,
-    DiscordThreadRouter,
-)
-from harness.domain_consultation import DomainConsultationHandler
+from harness.discord_thread_router import ChannelDomainMap, DiscordThreadRouter
 from harness.hardened_orchestrator import HardenedResearchOrchestrator
-from harness.routed_discord_adapter import (
-    DomainRoutedDiscordBotAdapter,
-    RoutedDiscordService,
-)
+from harness.routed_discord_adapter import DomainRoutedDiscordBotAdapter
 from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
 
@@ -36,7 +32,7 @@ def build_orchestrator(
 
 def build_routed_discord_service(
     config: HarnessConfig,
-) -> RoutedDiscordService:
+) -> AutonomousRoutedDiscordService:
     control_plane_dir = Path(
         os.getenv("CONTROL_PLANE_DIR", "control_plane")
     ).expanduser()
@@ -46,22 +42,7 @@ def build_routed_discord_service(
         ControlPlaneStore(control_plane_dir),
         ChannelDomainMap.from_environment(os.environ),
     )
-    dispatcher = DiscordChannelDispatcher(
-        router,
-        {
-            Domain.RESEARCH: DomainConsultationHandler(
-                config,
-                router.store,
-                Domain.RESEARCH,
-            ),
-            Domain.KAGGLE: DomainConsultationHandler(
-                config,
-                router.store,
-                Domain.KAGGLE,
-            ),
-        },
-    )
-    return RoutedDiscordService(router, dispatcher)
+    return build_autonomous_routed_service(config, router)
 
 
 def _print_result(orchestrator: HardenedResearchOrchestrator, command: Command) -> None:
@@ -158,12 +139,16 @@ def main() -> None:
             raise SystemExit("DISCORD_BOT_TOKEN or --token is required for the real bot.")
         if _domain_routing_is_configured():
             service = build_routed_discord_service(config)
-            DomainRoutedDiscordBotAdapter(
-                token=token,
-                service=service,
-                create_threads=_bool_env("DISCORD_CREATE_THREADS", True),
-                log_channel_id=config.discord_log_channel_id,
-            ).run()
+            service.start()
+            try:
+                DomainRoutedDiscordBotAdapter(
+                    token=token,
+                    service=service,
+                    create_threads=_bool_env("DISCORD_CREATE_THREADS", True),
+                    log_channel_id=config.discord_log_channel_id,
+                ).run()
+            finally:
+                service.stop(wait=False)
         else:
             WorkerDiscordBotAdapter(
                 orchestrator_factory=lambda discord: HardenedResearchOrchestrator(

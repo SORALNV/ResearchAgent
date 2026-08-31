@@ -6,6 +6,8 @@ research_runs/
 runtime/
 control_plane/
 discord_work_sessions/
+compute_runtime/
+worker-runtime/
 __pycache__/
 .pytest_cache/
 *.pyc

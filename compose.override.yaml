@@ -1,0 +1,3 @@
+services:
+  edge:
+    command: ["python", "-m", "harness.platform.discord_edge_portable"]

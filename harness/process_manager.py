@@ -29,6 +29,9 @@ _SAFE_BASE_ENV = {
     "SSL_CERT_DIR",
     "SYSTEMROOT",
     "WINDIR",
+    # Codex authentication/config can be mounted independently of the
+    # invocation-specific HOME. The value is a path, not a credential.
+    "CODEX_HOME",
 }
 
 _HARD_DENY_PREFIXES = ("DISCORD_",)

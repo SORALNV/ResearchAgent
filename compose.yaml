@@ -1,0 +1,107 @@
+name: research-agent
+
+x-common: &common
+  build:
+    context: .
+  env_file:
+    - path: .env
+      required: false
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  networks:
+    - research-agent
+
+services:
+  core:
+    <<: *common
+    build:
+      context: .
+      target: core
+      args:
+        INSTALL_COMPUTER_USE: ${INSTALL_COMPUTER_USE:-false}
+    environment:
+      RESEARCH_AGENT_CORE_HOST: 0.0.0.0
+      RESEARCH_AGENT_CORE_PORT: 8080
+      RESEARCH_AGENT_CORE_PUBLIC_HOST: ${RESEARCH_AGENT_CORE_PUBLIC_HOST:-127.0.0.1}
+      RESEARCH_AGENT_DATA_DIR: /var/lib/research-agent/core
+      RESEARCH_AGENT_DATABASE: platform.sqlite3
+      CODEX_COMMAND: ${CODEX_COMMAND:-codex}
+      AGENT_ENV_ALLOWLIST: ${AGENT_ENV_ALLOWLIST:-OPENAI_API_KEY}
+      AGENT_HOME_MODE: ${AGENT_HOME_MODE:-isolated}
+      AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-auto}
+      AGENT_ALLOW_UNSANDBOXED_GENERIC: ${AGENT_ALLOW_UNSANDBOXED_GENERIC:-false}
+      COMPUTER_USE_ENABLED: ${COMPUTER_USE_ENABLED:-false}
+      COMPUTER_USE_HEADLESS: ${COMPUTER_USE_HEADLESS:-true}
+      KAGGLE_COMMAND: ${KAGGLE_COMMAND:-kaggle}
+      ALLOW_KAGGLE_FOR_RESEARCH: ${ALLOW_KAGGLE_FOR_RESEARCH:-false}
+      MAX_CONCURRENT_COMPUTE_JOBS: ${MAX_CONCURRENT_COMPUTE_JOBS:-2}
+      COMPUTE_POLL_SECONDS: ${COMPUTE_POLL_SECONDS:-15}
+    ports:
+      - "${CORE_BIND_ADDRESS:-127.0.0.1}:${CORE_PORT:-8080}:8080"
+    volumes:
+      - core-data:/var/lib/research-agent
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json,urllib.request;
+          d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3));
+          assert d.get('ok')
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+
+  edge:
+    <<: *common
+    build:
+      context: .
+      target: edge
+    environment:
+      RESEARCH_AGENT_CORE_URL: ${RESEARCH_AGENT_CORE_URL:-http://core:8080}
+      RESEARCH_AGENT_DATA_DIR: /tmp/research-agent-edge
+    depends_on:
+      core:
+        condition: service_healthy
+    profiles: ["full", "edge"]
+
+  worker:
+    <<: *common
+    build:
+      context: .
+      target: worker
+    environment:
+      RESEARCH_WORKER_HOST: 0.0.0.0
+      RESEARCH_WORKER_PORT: 8090
+      RESEARCH_WORKER_DATA_DIR: /var/lib/research-agent/worker
+      RESEARCH_WORKER_PUBLIC_URL: ${RESEARCH_WORKER_PUBLIC_URL:-http://127.0.0.1:8090}
+    ports:
+      - "${WORKER_BIND_ADDRESS:-127.0.0.1}:${WORKER_PORT:-8090}:8090"
+    volumes:
+      - worker-data:/var/lib/research-agent
+    profiles: ["worker"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json,urllib.request;
+          d=json.load(urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3));
+          assert d.get('ok')
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+
+networks:
+  research-agent:
+    driver: bridge
+
+volumes:
+  core-data:
+  worker-data:

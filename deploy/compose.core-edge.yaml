@@ -1,0 +1,50 @@
+name: research-agent-core-edge
+
+services:
+  core:
+    build:
+      context: ..
+      target: core
+      args:
+        INSTALL_COMPUTER_USE: ${INSTALL_COMPUTER_USE:-false}
+    env_file:
+      - .env.core
+    command: ["uvicorn", "harness.platform.asgi_portable:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${CORE_BIND_ADDRESS:-127.0.0.1}:${CORE_PORT:-8080}:8080"
+    volumes:
+      - core-data:/var/lib/research-agent
+    networks: [research-agent]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)); assert d.get('ok')"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+
+  edge:
+    build:
+      context: ..
+      target: edge
+    env_file:
+      - .env.edge
+    command: ["python", "-m", "harness.platform.discord_edge_portable"]
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      core:
+        condition: service_healthy
+    networks: [research-agent]
+
+networks:
+  research-agent:
+    driver: bridge
+
+volumes:
+  core-data:

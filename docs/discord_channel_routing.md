@@ -30,8 +30,9 @@ DISCORD_CHANNEL_DOMAIN_MAP=111111111111111111=research,222222222222222222=kaggle
 DISCORD_RESEARCH_CHANNEL_IDS=111111111111111111
 DISCORD_KAGGLE_CHANNEL_IDS=222222222222222222
 
-# Durable router state. Keep this on persistent storage.
-CONTROL_PLANE_DIR=runtime/control_plane
+# Durable router state. Relative paths are resolved under PROJECT_ROOT.
+# Keep this directory on persistent storage.
+CONTROL_PLANE_DIR=control_plane
 ```
 
 JSON is also accepted:

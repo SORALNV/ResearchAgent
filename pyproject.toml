@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "research-agent-harness"
-version = "0.1.0"
-description = "MVP research harness with Discord control, planning gates, and mock agent runners."
+version = "0.2.0"
+description = "Portable research and Kaggle agent control plane with Discord, Codex, OpenAI providers, checkpoints, and approval gates."
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
 discord = ["discord.py>=2.4"]
+openai = ["openai>=1.66.0"]
+runtime = ["discord.py>=2.4", "openai>=1.66.0"]
 test = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]

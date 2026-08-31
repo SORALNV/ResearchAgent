@@ -99,6 +99,8 @@ def configure_openai(monkeypatch, order: str = "openai_responses") -> None:
     monkeypatch.setenv("AGENT_RUNTIME_ORDER", order)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("OPENAI_COMPUTER_ALLOWED_STAGES", "main_plan")
+    monkeypatch.setenv("OPENAI_COMPUTER_REQUIRE_APPROVAL", "true")
 
 
 def test_openai_responses_provider_records_usage_and_runtime_events(

@@ -285,7 +285,7 @@ class NaturalConversationHandler:
             except (TypeError, ValueError):
                 continue
             self.store.append_event(
-                event_type=ResultFeedbackEngine.PROPOSAL_EVENT,
+                event_type=_feedback_event("PROPOSAL", "compute.hypothesis.proposed"),
                 lane=EventLane.DATA,
                 project_id=ingress.route.project.project_id,
                 work_session_id=ingress.route.work_session.work_session_id,
@@ -355,8 +355,8 @@ class NaturalConversationHandler:
             if event.event_type not in {
                 "discord.message.received",
                 self.RESPONSE_EVENT_TYPE,
-                ResultFeedbackEngine.RESULT_EVENT,
-                ResultFeedbackEngine.PROPOSAL_EVENT,
+                _feedback_event("RESULT", "compute.result.collected"),
+                _feedback_event("PROPOSAL", "compute.hypothesis.proposed"),
                 "kaggle.submission.candidate",
                 "kaggle.submission.completed",
                 "research.paper.completed",
@@ -817,7 +817,7 @@ class NaturalChannelService:
                 limit=500,
             )
         ):
-            if event.event_type != ResultFeedbackEngine.PROPOSAL_EVENT:
+            if event.event_type != _feedback_event("PROPOSAL", "compute.hypothesis.proposed"):
                 continue
             raw = event.payload.get("proposal")
             if not isinstance(raw, Mapping):
@@ -1011,6 +1011,13 @@ def build_natural_channel_service(
     )
 
 
+def _feedback_event(kind: str, fallback: str) -> str:
+    for name, value in vars(ResultFeedbackEngine).items():
+        if kind in name.upper() and "EVENT" in name.upper() and isinstance(value, str):
+            return value
+    return fallback
+
+
 def _normalize_proposal(
     value: Mapping[str, Any],
     *,
@@ -1022,7 +1029,9 @@ def _normalize_proposal(
     candidates = {
         "domain": domain,
         "parent_job_id": parent_job_id,
+        "default_parent_job_id": parent_job_id,
         "parent_result_ref": parent_result_ref,
+        "default_parent_result_ref": parent_result_ref,
         "seed": seed,
     }
     parameters = inspect.signature(normalize_hypothesis_proposal).parameters
@@ -1135,7 +1144,7 @@ def _select_result_ref(store: Any, route: DiscordThreadRoute, text: str) -> str 
             lanes=[EventLane.DATA],
             limit=1000,
         )
-        if event.event_type == ResultFeedbackEngine.RESULT_EVENT
+        if event.event_type == _feedback_event("RESULT", "compute.result.collected")
     ]
     if not events:
         return None

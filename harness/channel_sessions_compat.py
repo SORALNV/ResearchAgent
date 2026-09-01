@@ -287,7 +287,10 @@ class ChannelSessionRegistry:
                     "DISCORD_CHANNEL_SESSIONS_JSON must be an object or array"
                 )
 
-        legacy = ChannelDomainMap.from_environment(environ).to_dict()
+        try:
+            legacy = ChannelDomainMap.from_environment(environ).to_dict()
+        except ValueError:
+            legacy = {}
         known = {
             str(item.get("conversation_id") or item.get("channel_id") or "")
             for item in records

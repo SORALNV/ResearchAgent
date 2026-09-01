@@ -1,0 +1,54 @@
+name: natural-channel-finalize
+
+on:
+  push:
+    branches:
+      - feature/natural-channel-workspaces
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/natural-channel-workspaces
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install
+        run: python -m pip install -e '.[test]'
+      - name: Apply final migration edits
+        run: python tools/finalize_natural_channel_workspaces.py
+      - name: Compile
+        run: python -m compileall -q harness main.py
+      - name: Test
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pytest -q 2>&1 | tee natural-channel-test.log
+      - name: Commit passing migration
+        if: steps.test.outcome == 'success'
+        run: |
+          rm -f natural-channel-test.log
+          git rm .github/workflows/natural-channel-finalize.yml tools/finalize_natural_channel_workspaces.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add harness/channel_sessions.py harness/natural_channel_service.py .env.example README.md
+          git commit -m 'refactor: finalize natural channel workflow'
+          git push origin HEAD:feature/natural-channel-workspaces
+      - name: Commit diagnostics
+        if: steps.test.outcome != 'success'
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add natural-channel-test.log harness/channel_sessions.py harness/natural_channel_service.py .env.example README.md
+          git commit -m 'chore: record natural channel validation failure' || true
+          git push origin HEAD:feature/natural-channel-workspaces
+          exit 1

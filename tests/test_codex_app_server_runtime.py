@@ -99,11 +99,18 @@ class _FakeAppServer:
     ) -> _FakeProcess:
         assert list(command[:2]) == ["codex", "app-server"]
         assert cwd.is_dir()
-        assert "DISCORD_BOT_TOKEN" not in environment
+        for secret in (
+            "DISCORD_BOT_TOKEN",
+            "KAGGLE_API_TOKEN",
+            "REMOTE_GPU_WORKER_TOKEN",
+            "WORKER_TOKEN",
+        ):
+            assert secret not in environment
         return self.process
 
     def receive(self, message: Mapping[str, Any]) -> None:
         value = dict(message)
+        assert "jsonrpc" not in value
         with self._lock:
             self.messages.append(value)
         method = value.get("method")
@@ -226,6 +233,12 @@ class _FakeAppServer:
             }
         )
 
+    def resolve_server_request(self, request_id: int = 900) -> None:
+        self.notify(
+            "serverRequest/resolved",
+            {"threadId": self.thread_id, "requestId": request_id},
+        )
+
     def start_subagent(self) -> None:
         self.notify(
             "thread/started",
@@ -302,7 +315,7 @@ def _run_in_thread(runtime: CodexAppServerRuntime, tmp_path: Path, session_id: s
 
 
 def test_settings_reject_codex_exec_and_require_user_approval_routing(tmp_path: Path):
-    with pytest.raises(ValueError, match="official.*codex app-server"):
+    with pytest.raises(ValueError, match="codex exec is disabled"):
         CodexAppServerSettings.from_environment(
             tmp_path,
             {"CODEX_APP_SERVER_COMMAND": "codex exec --json"},
@@ -317,9 +330,7 @@ def test_settings_reject_codex_exec_and_require_user_approval_routing(tmp_path: 
         )
 
 
-def test_thread_is_persisted_and_resumed_for_the_same_discord_work_session(
-    tmp_path: Path,
-):
+def test_official_handshake_and_thread_resume_wire_shape(tmp_path: Path):
     fake = _FakeAppServer()
     runtime = CodexAppServerRuntime(_settings(tmp_path), process_factory=fake.factory)
 
@@ -335,6 +346,14 @@ def test_thread_is_persisted_and_resumed_for_the_same_discord_work_session(
     second_thread.join(2)
     assert second_result["value"].output == "second"
 
+    initialize = fake.requests("initialize")[0]
+    assert initialize["params"]["capabilities"] == {
+        "experimentalApi": False,
+        "requestAttestation": False,
+    }
+    initialized = fake.requests("initialized")[0]
+    assert initialized == {"method": "initialized"}
+
     assert len(fake.requests("thread/start")) == 1
     assert len(fake.requests("thread/resume")) == 1
     assert len(fake.requests("turn/start")) == 2
@@ -344,9 +363,10 @@ def test_thread_is_persisted_and_resumed_for_the_same_discord_work_session(
         {
             "type": "text",
             "text": "inspect the repository",
-            "text_elements": [],
+            "textElements": [],
         }
     ]
+    assert "text_elements" not in json.dumps(turn_params)
     assert turn_params["approvalPolicy"] == "on-request"
     assert turn_params["approvalsReviewer"] == "user"
     assert "multiAgentMode" not in turn_params
@@ -356,7 +376,9 @@ def test_thread_is_persisted_and_resumed_for_the_same_discord_work_session(
     runtime.stop()
 
 
-def test_active_turn_supports_official_steer_interrupt_and_approval(tmp_path: Path):
+def test_active_turn_supports_steer_interrupt_approval_and_native_subagents(
+    tmp_path: Path,
+):
     fake = _FakeAppServer()
     runtime = CodexAppServerRuntime(_settings(tmp_path), process_factory=fake.factory)
     events: list[CodexRuntimeEvent] = []
@@ -374,12 +396,11 @@ def test_active_turn_supports_official_steer_interrupt_and_approval(tmp_path: Pa
     assert response["turn_id"] == active_turn
     steer = fake.requests("turn/steer")[-1]
     assert steer["params"]["expectedTurnId"] == active_turn
-    assert steer["params"]["input"][0]["text_elements"] == []
+    assert steer["params"]["input"][0]["textElements"] == []
 
     fake.request_command_approval()
     _wait(lambda: bool(runtime.pending_approvals(session_id="WS-2")))
     approval = runtime.pending_approvals(session_id="WS-2")[0]
-    assert approval.thread_id == "thr-root"
     runtime.resolve_approval(
         session_id="WS-2",
         approval_ref=approval.approval_ref,
@@ -401,14 +422,34 @@ def test_active_turn_supports_official_steer_interrupt_and_approval(tmp_path: Pa
 
     interrupted = runtime.interrupt(session_id="WS-2")
     assert interrupted["turn_id"] == active_turn
-    request = fake.requests("turn/interrupt")[-1]
-    assert request["params"] == {
+    assert fake.requests("turn/interrupt")[-1]["params"] == {
         "threadId": "thr-root",
         "turnId": active_turn,
     }
     thread.join(2)
     assert result["value"].status == "interrupted"
     assert result["value"].cancelled is True
+    runtime.stop()
+
+
+def test_server_request_resolved_and_turn_completion_remove_stale_approvals(
+    tmp_path: Path,
+):
+    fake = _FakeAppServer()
+    runtime = CodexAppServerRuntime(_settings(tmp_path), process_factory=fake.factory)
+
+    thread, _ = _run_in_thread(runtime, tmp_path, "WS-3")
+    assert fake.turn_started.wait(2)
+    fake.request_command_approval(901)
+    _wait(lambda: len(runtime.pending_approvals(session_id="WS-3")) == 1)
+    fake.resolve_server_request(901)
+    _wait(lambda: not runtime.pending_approvals(session_id="WS-3"))
+
+    fake.request_command_approval(902)
+    _wait(lambda: len(runtime.pending_approvals(session_id="WS-3")) == 1)
+    fake.complete(text="done")
+    thread.join(2)
+    assert runtime.pending_approvals(session_id="WS-3") == ()
     runtime.stop()
 
 
@@ -484,10 +525,7 @@ def test_routed_service_persists_safe_events_and_steers_active_turn(tmp_path: Pa
     fake.complete(text="completed after decline")
     thread.join(2)
 
-    events = router.store.latest_events(
-        work_session_id=session_id,
-        limit=500,
-    )
+    events = router.store.latest_events(work_session_id=session_id, limit=500)
     assert any(item.event_type == "codex.thread.bound" for item in events)
     assert any(item.event_type == "codex.turn.steer.sent" for item in events)
     assert any(
@@ -497,16 +535,23 @@ def test_routed_service_persists_safe_events_and_steers_active_turn(tmp_path: Pa
     )
     serialized = json.dumps([item.to_dict() for item in events], ensure_ascii=False)
     assert "first message must not be persisted" not in serialized
-    assert any(sid == session_id and "approval required" in text for sid, text in delivered)
+    assert any(
+        sid == session_id and "approval required" in text
+        for sid, text in delivered
+    )
     service.stop()
 
 
-def test_discord_adapter_exposes_app_server_controls_and_main_uses_it():
+def test_discord_adapter_exposes_controls_and_no_codex_exec_path_remains():
     root = Path(__file__).resolve().parents[1]
     adapter = (root / "harness" / "codex_discord_adapter.py").read_text(
         encoding="utf-8"
     )
     main = (root / "main.py").read_text(encoding="utf-8")
+    sandbox = (root / "harness" / "sandbox.py").read_text(encoding="utf-8")
+    provider = (root / "harness" / "provider_runtime.py").read_text(
+        encoding="utf-8"
+    )
     for command in (
         'name="steer"',
         'name="interrupt"',
@@ -517,3 +562,5 @@ def test_discord_adapter_exposes_app_server_controls_and_main_uses_it():
         assert command in adapter
     assert "CodexAppServerDiscordBotAdapter" in main
     assert "DomainRoutedDiscordBotAdapter(" not in main
+    assert "codex exec" not in sandbox
+    assert "codex_app_server" in provider

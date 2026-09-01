@@ -293,17 +293,17 @@ def execution_opening_message(
 
 
 def build_help_message(service: Any, location: DiscordLocation) -> str:
-    channel = getattr(service, "registry", None)
-    config = channel.get(location) if channel is not None else None
+    registry = getattr(service, "registry", None)
+    config = registry.get(location) if registry is not None else None
     context = (
-        f"**{config.subject}**（`{config.domain.value}`）"
+        f"{config.subject} (`{config.domain.value}`)"
         if config is not None
         else "未設定チャンネル"
     )
     return (
         f"**ResearchAgent Help — {context}**\n"
         "**通常会話:** 仮説相談、`これを実装して試して`、結果解釈、`このCSVで提出しよう`、`この結果を論文にまとめて`。実行依頼は専用Threadを作り、途中経過を流します。\n"
-        "**案件:** `/agent setup` · `/agent channel` · `/agent status` · `/agent readiness` · `/agent finish`\n"
+        "**案件:** `/agent help` · `/agent setup` · `/agent channel` · `/agent status` · `/agent readiness` · `/agent finish`\n"
         "**Job:** `/agent job list` · `/agent compute_backends` · `/agent approve_compute` · `/agent cancel_job`\n"
         "**Codex:** `/agent codex_status` · `/agent steer` · `/agent interrupt` · `/agent codex_approvals` · `/agent codex_approval`"
     )
@@ -437,12 +437,36 @@ def build_job_list_message(
     return "\n".join(lines)
 
 
-def format_job_progress(job: Any) -> str:
-    status = str(getattr(getattr(job, "status", None), "value", getattr(job, "status", "unknown")))
+def _runtime_progress(runtime: Any | None) -> tuple[str, float | None]:
+    handle = getattr(runtime, "handle", None) if runtime is not None else None
+    stage = str(getattr(handle, "stage", "") or "")
+    raw_progress = getattr(handle, "progress", None)
+    try:
+        progress = float(raw_progress) if raw_progress is not None else None
+    except (TypeError, ValueError):
+        progress = None
+    if progress is not None:
+        progress = min(1.0, max(0.0, progress))
+    return stage, progress
+
+
+def format_job_progress(job: Any, *, runtime: Any | None = None) -> str:
+    status = str(
+        getattr(
+            getattr(job, "status", None),
+            "value",
+            getattr(job, "status", "unknown"),
+        )
+    )
     backend = str(getattr(job, "backend_id", None) or "-")
     error = " ".join(str(getattr(job, "error", "") or "").split())[:600]
     result_ref = str(getattr(job, "checkpoint_ref", None) or "")
+    stage, progress = _runtime_progress(runtime)
     message = f"**Job更新:** `{job.job_id}` → **{status}** · backend `{backend}`"
+    if stage:
+        message += f" · stage `{stage}`"
+    if progress is not None:
+        message += f" · `{progress * 100:.0f}%`"
     if result_ref:
         message += f" · result `{result_ref}`"
     if error:
@@ -450,12 +474,25 @@ def format_job_progress(job: Any) -> str:
     return message
 
 
-def job_progress_key(job: Any) -> tuple[str, str, str, str]:
+def job_progress_key(
+    job: Any,
+    *,
+    runtime: Any | None = None,
+) -> tuple[str, str, str, str, str, str]:
+    stage, progress = _runtime_progress(runtime)
     return (
-        str(getattr(getattr(job, "status", None), "value", getattr(job, "status", ""))),
+        str(
+            getattr(
+                getattr(job, "status", None),
+                "value",
+                getattr(job, "status", ""),
+            )
+        ),
         str(getattr(job, "backend_id", None) or ""),
         str(getattr(job, "checkpoint_ref", None) or ""),
         str(getattr(job, "error", None) or ""),
+        stage,
+        "" if progress is None else f"{progress:.4f}",
     )
 
 

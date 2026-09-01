@@ -228,6 +228,8 @@ class NaturalChannelDiscordBotAdapter:
                             else "completed"
                         )
                         execution_registry.set_status(thread_id, final_status)
+                        if session_targets.get(record.work_session_id) is target:
+                            session_targets.pop(record.work_session_id, None)
             except Exception as exc:
                 await log(
                     f"job watcher failed thread={thread_id} job={job_id}: "
@@ -376,16 +378,19 @@ class NaturalChannelDiscordBotAdapter:
             lock = locks.setdefault(location.conversation_id, asyncio.Lock())
             async with lock:
                 try:
-                    # Recheck after lock acquisition so a closely arriving message
-                    # becomes official turn/steer input rather than a queued turn.
-                    steered = await asyncio.to_thread(
-                        self.service.try_steer_codex,
-                        location,
-                        message_id=str(message.id),
-                        actor_id=str(message.author.id),
-                        text=str(message.content),
-                        title=title,
-                    )
+                    # Ordinary follow-ups may steer a running turn. Explicit
+                    # execution requests wait for the channel lock and start their own
+                    # natural-action turn so the Job/final-action contract is preserved.
+                    steered = None
+                    if not action_message:
+                        steered = await asyncio.to_thread(
+                            self.service.try_steer_codex,
+                            location,
+                            message_id=str(message.id),
+                            actor_id=str(message.author.id),
+                            text=str(message.content),
+                            title=title,
+                        )
                     if steered is not None:
                         await send_chunks(
                             message.channel,
@@ -432,6 +437,8 @@ class NaturalChannelDiscordBotAdapter:
                                 execution_record.thread_id,
                                 "completed",
                             )
+                            if session_targets.get(channel.work_session_id) is progress_target:
+                                session_targets.pop(channel.work_session_id, None)
                 except UnmappedDiscordChannelError as exc:
                     await send_chunks(progress_target, str(exc))
                 except Exception as exc:

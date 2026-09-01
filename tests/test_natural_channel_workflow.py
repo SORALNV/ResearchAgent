@@ -110,6 +110,9 @@ def test_natural_intents_are_explicit_and_negation_is_respected() -> None:
     assert _explicit_run_intent("P-021を実装して試して") is True
     assert _explicit_run_intent("P-021の利点を教えて") is False
     assert _explicit_run_intent("まだ実行しないで") is False
+    assert _explicit_run_intent("このリポジトリを改修して") is True
+    assert _explicit_run_intent("origin/mainを--ff-onlyで取り込んで") is True
+    assert _explicit_run_intent("修正する必要がありますか？") is False
     assert _explicit_submit_intent("このCSVで提出しよう") is True
     assert _explicit_submit_intent("まだ提出しない") is False
     assert _explicit_paper_intent("この結果を論文にまとめて") is True

@@ -147,7 +147,13 @@ def test_job_list_and_progress_use_current_work_session(tmp_path: Path) -> None:
     assert "CatBoost native categorical" in result
     assert job_is_terminal(running) is False
     assert job_is_terminal(succeeded) is True
-    assert "local_gpu_worker" in format_job_progress(succeeded)
+    runtime = SimpleNamespace(
+        handle=SimpleNamespace(stage="training", progress=0.42)
+    )
+    progress = format_job_progress(succeeded, runtime=runtime)
+    assert "local_gpu_worker" in progress
+    assert "training" in progress
+    assert "42%" in progress
 
 
 def test_execution_narration_prompt_is_attached_once() -> None:
@@ -183,6 +189,8 @@ def test_active_adapter_registers_requested_commands_and_execution_threads() -> 
     assert 'name="job"' in adapter
     assert 'name="list"' in adapter
     assert "message.create_thread" in adapter
+    assert "if not action_message" in adapter
+    assert "session_targets.pop" in adapter
     assert "DISCORD_EXECUTION_THREADS" in (
         root / "main.py"
     ).read_text(encoding="utf-8")

@@ -64,6 +64,7 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
         self._starting_by_binding: dict[str, threading.Event] = {}
 
         original_register = self.client.register_turn
+        original_active_for_binding = self.client.active_for_binding
 
         def register_and_signal(run: Any) -> None:
             original_register(run)
@@ -72,10 +73,19 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
             if event is not None:
                 event.set()
 
-        # The client is private to this runtime. Wrapping registration keeps the
-        # official wire protocol untouched while allowing an immediately
-        # following Discord message to wait for the returned turn ID and steer it.
+        def active_after_start(binding_key: str) -> Any | None:
+            active = original_active_for_binding(binding_key)
+            if active is not None:
+                return active
+            self._wait_for_starting_binding(binding_key)
+            return original_active_for_binding(binding_key)
+
+        # The client is private to this runtime. Wrapping registration and the
+        # active-turn preflight keeps the official wire protocol untouched while
+        # allowing an immediately following Discord message to wait for the
+        # returned turn ID and steer it.
         self.client.register_turn = register_and_signal  # type: ignore[method-assign]
+        self.client.active_for_binding = active_after_start  # type: ignore[method-assign]
 
     def run_turn(
         self,
@@ -126,11 +136,7 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
                         self._starting_by_binding.pop(binding_key, None)
                 event.set()
 
-    def _discord_run(self, session_id: str) -> Any | None:
-        active = super()._discord_run(session_id)
-        if active is not None:
-            return active
-        binding_key = f"discord:{session_id}"
+    def _wait_for_starting_binding(self, binding_key: str) -> None:
         with self._starting_guard:
             event = self._starting_by_binding.get(binding_key)
         if event is not None:
@@ -140,6 +146,11 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
                     2.0,
                 )
             )
+
+    def _discord_run(self, session_id: str) -> Any | None:
+        # super() reaches the wrapped client.active_for_binding(), so every
+        # caller, including service preflight checks, receives the same race-safe
+        # behavior rather than only direct steer() calls.
         return super()._discord_run(session_id)
 
 

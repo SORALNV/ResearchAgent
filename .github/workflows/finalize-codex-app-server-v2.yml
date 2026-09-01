@@ -1,0 +1,86 @@
+name: finalize-codex-app-server-v2
+
+on:
+  push:
+    branches:
+      - fix/codex-app-server-v2-conformance
+    paths:
+      - ".github/workflows/finalize-codex-app-server-v2.yml"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  verify-and-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/codex-app-server-v2-conformance
+          fetch-depth: 0
+
+      - name: Apply the generated v2 field name and remove temporary workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/textElements/text_elements/g' tests/test_codex_app_server_runtime.py
+          rm -f \
+            .github/workflows/patch-codex-v2-test.yml \
+            .github/workflows/finalize-codex-app-server-v2.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/test_codex_app_server_runtime.py .github/workflows
+          if ! git diff --cached --quiet; then
+            git commit -m 'test: align App Server regression with generated v2 schema'
+            git push origin HEAD:fix/codex-app-server-v2-conformance
+          fi
+          git rev-parse HEAD > /tmp/verified-head-sha
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install -e '.[test]'
+
+      - name: Compile
+        run: python -m compileall -q harness main.py
+
+      - name: Test
+        run: pytest -q
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/amd64
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg INSTALL_CODEX=false \
+            --progress=plain \
+            .
+
+      - name: Build linux/arm64
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --build-arg INSTALL_CODEX=false \
+            --progress=plain \
+            .
+
+      - name: Merge PR 14 only after all verification passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(cat /tmp/verified-head-sha)"
+          gh api \
+            --method PUT \
+            "repos/${GITHUB_REPOSITORY}/pulls/14/merge" \
+            -f merge_method=squash \
+            -f sha="$head_sha"

@@ -196,8 +196,8 @@ class SubAgentCommandRunner:
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
-                "--ask-for-approval",
-                "never",
+                "-c",
+                'approval_policy="never"',
                 "-",
             ]
         return parts

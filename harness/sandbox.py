@@ -43,8 +43,8 @@ def build_agent_command(
             "--skip-git-repo-check",
             "--sandbox",
             sandbox_mode,
-            "--ask-for-approval",
-            "never",
+            "-c",
+            'approval_policy="never"',
             "-",
         ]
 

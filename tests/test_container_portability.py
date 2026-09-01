@@ -12,6 +12,7 @@ def test_dockerfile_is_architecture_neutral_and_non_root():
     assert "platform=linux/amd64" not in body
     assert "USER researchagent" in body
     assert "CODEX_HOME=/data/codex" in body
+    assert "codex-code-mode-host" in body
     assert "harness.container_health" in body
 
 
@@ -24,6 +25,7 @@ def test_compose_is_same_for_windows_docker_desktop_and_jetson():
     assert "RA_CODEX_HOME_DIR" in body
     assert "cap_drop:" in body
     assert "no-new-privileges:true" in body
+    assert "seccomp=unconfined" in body
     assert "read_only: true" in body
     assert "/home/researchagent:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700" in body
 

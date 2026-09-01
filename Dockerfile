@@ -31,9 +31,14 @@ RUN if [ "${INSTALL_CODEX}" = "true" ]; then \
         HOME=/root sh /tmp/install-codex.sh; \
         CODEX_BIN="$(command -v codex)"; \
         test -n "${CODEX_BIN}" && test -x "${CODEX_BIN}"; \
+        CODEX_REAL_BIN="$(readlink -f "${CODEX_BIN}")"; \
+        CODE_MODE_HOST_BIN="$(dirname "${CODEX_REAL_BIN}")/codex-code-mode-host"; \
+        test -x "${CODE_MODE_HOST_BIN}"; \
         if [ "${CODEX_BIN}" != "/usr/local/bin/codex" ]; then \
             install -m 0755 "${CODEX_BIN}" /usr/local/bin/codex; \
         fi; \
+        install -m 0755 "${CODE_MODE_HOST_BIN}" /usr/local/bin/codex-code-mode-host; \
+        test -x /usr/local/bin/codex-code-mode-host; \
         rm -f /tmp/install-codex.sh; \
     fi
 

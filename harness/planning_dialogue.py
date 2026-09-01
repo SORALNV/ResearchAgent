@@ -125,8 +125,8 @@ class PlanningDialogueRunner:
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
-                "never",
+                "-c",
+                'approval_policy="never"',
                 "-",
             ]
         return parts

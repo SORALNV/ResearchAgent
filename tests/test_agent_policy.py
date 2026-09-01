@@ -59,8 +59,9 @@ def test_codex_command_is_built_safely(tmp_path):
     assert str(tmp_path) in command
     assert "--sandbox" in command
     assert "workspace-write" in command
-    assert "--ask-for-approval" in command
-    assert "never" in command
+    assert "--ask-for-approval" not in command
+    assert "-c" in command
+    assert 'approval_policy="never"' in command
 
 
 class NoticeRunner:

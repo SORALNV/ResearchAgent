@@ -30,4 +30,5 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+      - seccomp=unconfined
     stop_grace_period: 45s

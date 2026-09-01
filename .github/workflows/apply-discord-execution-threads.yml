@@ -1,0 +1,33 @@
+name: apply-discord-execution-threads
+
+on:
+  push:
+    branches:
+      - feat/discord-execution-threads
+    paths:
+      - tools/**
+      - .github/workflows/apply-discord-execution-threads.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/discord-execution-threads
+          fetch-depth: 0
+      - name: Apply validated source transform
+        run: python tools/apply_discord_execution_threads.py
+      - name: Compile transformed sources
+        run: python -m compileall -q harness main.py
+      - name: Commit generated source changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "feat(discord): add execution progress threads and operator commands"
+          git push origin HEAD:feat/discord-execution-threads

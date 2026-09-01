@@ -4,6 +4,9 @@ import argparse
 import os
 from pathlib import Path
 
+from harness.codex_app_server import get_shared_codex_app_server
+from harness.codex_app_server_service import CodexAppServerRoutedService
+from harness.codex_discord_adapter import CodexAppServerDiscordBotAdapter
 from harness.command_parser import parse_research_command
 from harness.commands import Command, CommandContext
 from harness.compute_models import BackendCapabilities
@@ -11,14 +14,10 @@ from harness.config import HarnessConfig
 from harness.control_plane import ControlPlaneStore
 from harness.discord_adapter import FakeDiscordAdapter
 from harness.discord_thread_router import ChannelDomainMap, DiscordThreadRouter
-from harness.final_actions import (
-    CompleteRoutedDiscordService,
-    build_complete_routed_service,
-)
+from harness.final_actions import build_complete_routed_service
 from harness.hardened_orchestrator import HardenedResearchOrchestrator
 from harness.kaggle_cli_transport import current_kaggle_transport_from_env
 from harness.kaggle_submission import build_kaggle_submission_pipeline
-from harness.routed_discord_adapter import DomainRoutedDiscordBotAdapter
 from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
 
@@ -35,7 +34,7 @@ def build_orchestrator(
 
 def build_routed_discord_service(
     config: HarnessConfig,
-) -> CompleteRoutedDiscordService:
+) -> CodexAppServerRoutedService:
     control_plane_dir = Path(
         os.getenv("CONTROL_PLANE_DIR", "control_plane")
     ).expanduser()
@@ -50,10 +49,14 @@ def build_routed_discord_service(
         project_root=config.project_root,
         transport=current_kaggle_transport_from_env(),
     )
-    service = build_complete_routed_service(
+    base_service = build_complete_routed_service(
         config,
         router,
         submission=submission,
+    )
+    service = CodexAppServerRoutedService(
+        base_service,
+        get_shared_codex_app_server(config),
     )
     _configure_kaggle_backend_capabilities(service)
     if not _bool_env("LOCAL_PROCESS_COMPUTE_ENABLED", False):
@@ -67,7 +70,7 @@ def build_routed_discord_service(
 
 
 def _configure_kaggle_backend_capabilities(
-    service: CompleteRoutedDiscordService,
+    service: CodexAppServerRoutedService,
 ) -> None:
     backend = service.compute.broker.backends.get("kaggle_notebook")
     if backend is None:
@@ -196,7 +199,7 @@ def main() -> None:
             service = build_routed_discord_service(config)
             service.start()
             try:
-                DomainRoutedDiscordBotAdapter(
+                CodexAppServerDiscordBotAdapter(
                     token=token,
                     service=service,
                     create_threads=_bool_env("DISCORD_CREATE_THREADS", True),

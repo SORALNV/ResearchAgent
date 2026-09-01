@@ -23,13 +23,21 @@ def attach_iteration_learning(
     if not _bool_value(source.get("METHODBOOK_ENABLED"), True):
         return service
 
-    feedback = getattr(getattr(service, "compute", None), "feedback", None)
-    scheduler = getattr(getattr(service, "compute", None), "scheduler", None)
+    existing = getattr(service, "iteration_learning_adapter", None)
+    if isinstance(existing, LearningResultFeedbackAdapter):
+        attach_methodbook_context(service, existing.method_store)
+        service.iteration_memo_engine = existing.memo_engine
+        return service
+
+    compute = getattr(service, "compute", None)
+    feedback = getattr(compute, "feedback", None)
+    scheduler = getattr(compute, "scheduler", None)
     if feedback is None or scheduler is None:
         return service
     if isinstance(feedback, LearningResultFeedbackAdapter):
-        attach_methodbook_context(service, feedback.method_store)
+        service.iteration_learning_adapter = feedback
         service.iteration_memo_engine = feedback.memo_engine
+        attach_methodbook_context(service, feedback.method_store)
         return service
 
     method_store = MethodCardStore.from_environment(config.project_root, source)
@@ -45,8 +53,13 @@ def attach_iteration_learning(
         planner=planner,
     )
     learning = LearningResultFeedbackAdapter(feedback, memo_engine)
-    service.compute.feedback = learning
+
+    # ComputeStack is intentionally frozen, but scheduler.feedback is the active
+    # execution dependency. Keep the public stack view consistent without
+    # replacing the stack object shared by the existing service wrappers.
     scheduler.feedback = learning
+    object.__setattr__(compute, "feedback", learning)
+    service.iteration_learning_adapter = learning
     service.iteration_memo_engine = memo_engine
     attach_methodbook_context(service, method_store)
     method_store.render_markdown()

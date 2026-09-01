@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from harness.channel_sessions import ChannelSessionConfig
 from harness.control_plane import Domain
@@ -32,7 +32,17 @@ class MethodBookConversationHandler(NaturalConversationHandler):
         subject = channel.subject if channel else ingress.route.work_session.title
         target = channel.target_ref if channel else ""
         query = " ".join(item for item in (subject, target, user_text) if item)
-        cards = self.method_store.search(query, limit=8)
+        task_family, modality, metric_family = _recent_scope(
+            self.store,
+            ingress.route.work_session.work_session_id,
+        )
+        cards = self.method_store.search(
+            query,
+            task_family=task_family,
+            modality=modality,
+            metric_family=metric_family,
+            limit=8,
+        )
         payload = [
             {
                 "method_id": card.method_id,
@@ -89,3 +99,37 @@ def attach_methodbook_context(
     service.dispatcher.handlers[Domain.KAGGLE] = enhanced
     service.method_store = method_store
     return service
+
+
+def _recent_scope(store: Any, work_session_id: str) -> tuple[str, str, str]:
+    try:
+        jobs = store.list_jobs(work_session_id=work_session_id)
+    except Exception:
+        return "", "", ""
+    for job in reversed(jobs):
+        payload = getattr(getattr(job, "spec", None), "payload", {}) or {}
+        metadata = payload.get("proposal_metadata")
+        metadata_map = metadata if isinstance(metadata, Mapping) else {}
+        task_family = _first_text(
+            payload.get("task_family"),
+            metadata_map.get("task_family"),
+        )
+        modality = _first_text(
+            payload.get("modality"),
+            metadata_map.get("modality"),
+        )
+        metric_family = _first_text(
+            payload.get("metric_family"),
+            metadata_map.get("metric_family"),
+        )
+        if task_family or modality or metric_family:
+            return task_family, modality, metric_family
+    return "", "", ""
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        text = " ".join(str(value or "").split())
+        if text:
+            return text
+    return ""

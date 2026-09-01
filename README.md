@@ -20,6 +20,12 @@ main integration
 
 If no agent command is configured, the deterministic `MockAgentRunner` remains available for local demos and regression tests.
 
+## Discordチャンネル単位の運用
+
+現在のDiscord Edgeでは、**1チャンネルを1件のKaggleコンペまたは研究テーマ**として扱います。`/agent setup`で`kaggle`または`research`、案件名、対象を登録すると、Project・WorkSession・Codex threadが永続的に紐付きます。会話中に「試して」「実装して」「この案で進めて」と指示すれば実装からJob実行へ進み、「このCSVで提出しよう」「この結果を論文にまとめて」で既存の安全ゲート付き最終処理へ進みます。Discord上に戦略モード／実行モードの切替はありません。
+
+案件終了時は`/agent finish`で内部状態をアーカイブし、Discordチャンネル自体はユーザーが整理します。詳細は[`docs/natural_channel_workflow.md`](docs/natural_channel_workflow.md)を参照してください。
+
 ## Design Philosophy
 
 ResearchAgent should behave like a large, persistent `AGENTS.md` plus an execution journal. The harness records and routes work instead of pretending one model can simultaneously be the researcher, executor, reviewer, and final judge.

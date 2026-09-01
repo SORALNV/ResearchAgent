@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -9,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from harness.channel_sessions import (
+from harness.channel_sessions_compat import (
     ChannelSessionConfig,
     ChannelSessionDomainMap,
     ChannelSessionRegistry,
@@ -39,7 +40,6 @@ from harness.discord_thread_router import (
     DiscordThreadRoute,
 )
 from harness.human_decision_policy import (
-    ControlledAction,
     HumanDecisionKind,
     HumanDecisionVerdict,
 )
@@ -227,7 +227,7 @@ class NaturalConversationHandler:
                 reason=action.reason,
             )
         response_event = ingress.route.work_session
-        event = self.registry_event_store(ingress).append_event(
+        event = self._store.append_event(
             event_type=self.RESPONSE_EVENT_TYPE,
             lane=EventLane.CONTROL,
             project_id=ingress.route.project.project_id,
@@ -263,10 +263,6 @@ class NaturalConversationHandler:
             proposals=proposals,
         )
 
-    def registry_event_store(self, ingress: DiscordIngressResult):
-        # The dispatcher and handler always share the router's Control Plane.
-        return ingress.route_store if hasattr(ingress, "route_store") else self._store
-
     @property
     def _store(self):
         store = getattr(self, "store", None)
@@ -291,7 +287,7 @@ class NaturalConversationHandler:
             if not isinstance(value, Mapping):
                 continue
             try:
-                proposal = normalize_hypothesis_proposal(
+                proposal = _normalize_proposal(
                     value,
                     domain=self.domain,
                     parent_job_id=(
@@ -882,27 +878,21 @@ class NaturalChannelService:
         message_id: str,
     ) -> str:
         if proposal.parent_result_ref:
-            gate = self.router.check_human_gate(
-                route,
-                action=ControlledAction.CONTINUE_FROM_RESULT,
+            self.base_service.record_decision(
+                location,
+                title=route.work_session.title,
+                kind=HumanDecisionKind.RESULT_INTERPRETATION,
+                verdict=HumanDecisionVerdict.ACCEPT,
                 subject_ref=proposal.parent_result_ref,
+                note=(
+                    "通常会話で次実験を明示選択したため、親結果を次の検証に使う"
+                    f"という人間判断として記録: {text}"
+                ),
+                actor_id=actor_id,
+                message_id=message_id,
+                actor_is_human=True,
+                project_id=route.project.project_id,
             )
-            if not gate.allowed:
-                self.base_service.record_decision(
-                    location,
-                    title=route.work_session.title,
-                    kind=HumanDecisionKind.RESULT_INTERPRETATION,
-                    verdict=HumanDecisionVerdict.ACCEPT,
-                    subject_ref=proposal.parent_result_ref,
-                    note=(
-                        "通常会話で次実験を明示選択したため、親結果を次の検証に使う"
-                        f"という人間判断として記録: {text}"
-                    ),
-                    actor_id=actor_id,
-                    message_id=message_id,
-                    actor_is_human=True,
-                    project_id=route.project.project_id,
-                )
         self.base_service.record_decision(
             location,
             title=route.work_session.title,
@@ -922,8 +912,12 @@ class NaturalChannelService:
             (
                 job
                 for job in reversed(jobs)
-                if str(job.spec.payload.get("hypothesis_subject_ref") or "")
-                == proposal.subject_ref
+                if str(
+                    (getattr(getattr(job, "spec", None), "payload", {}) or {}).get(
+                        "hypothesis_subject_ref"
+                    )
+                    or ""
+                ) == proposal.subject_ref
             ),
             None,
         )
@@ -994,13 +988,7 @@ class NaturalChannelService:
         result_ref = _select_result_ref(self.router.store, route, text)
         if not result_ref:
             return "**論文化は開始していません。** 対象にできる実験結果がまだありません。"
-        gate = self.router.check_human_gate(
-            route,
-            action=ControlledAction.CONTINUE_FROM_RESULT,
-            subject_ref=result_ref,
-        )
-        if not gate.allowed:
-            self.base_service.record_decision(
+        self.base_service.record_decision(
                 location,
                 title=route.work_session.title,
                 kind=HumanDecisionKind.RESULT_INTERPRETATION,
@@ -1062,6 +1050,27 @@ def build_natural_channel_service(
         dispatcher,
     )
 
+
+
+def _normalize_proposal(
+    value: Mapping[str, Any],
+    *,
+    domain: Domain,
+    parent_job_id: str | None,
+    parent_result_ref: str | None,
+    seed: str,
+) -> HypothesisProposal:
+    """Call the repository normalizer without depending on optional parameters."""
+
+    candidates = {
+        "domain": domain,
+        "parent_job_id": parent_job_id,
+        "parent_result_ref": parent_result_ref,
+        "seed": seed,
+    }
+    parameters = inspect.signature(normalize_hypothesis_proposal).parameters
+    kwargs = {key: item for key, item in candidates.items() if key in parameters}
+    return normalize_hypothesis_proposal(value, **kwargs)
 
 def _extract_protocol(text: str) -> dict[str, Any]:
     for block in reversed(_fenced_blocks(text)):

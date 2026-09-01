@@ -184,22 +184,21 @@ class SubAgentCommandRunner:
         return invocation.output
 
     def _build_command(self, session: ResearchSession) -> list[str]:
+        """Return only non-Codex compatibility commands.
+
+        Codex commands are protocol-backed and must go through
+        ``ProviderAwareAgentCommandExecutor``. This helper is retained for
+        callers that inspect generic command configuration, but it no longer
+        manufactures a per-call ``codex exec`` process.
+        """
+
         assert self.config.sub_agent_command is not None
         parts = shlex.split(self.config.sub_agent_command)
-        executable = Path(parts[0]).name if parts else ""
-        if executable == "codex" and len(parts) == 1:
-            return [
-                parts[0],
-                "exec",
-                "--cd",
-                session.research_dir or str(self.config.project_root),
-                "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
-                "--ask-for-approval",
-                "never",
-                "-",
-            ]
+        executable = Path(parts[0]).name.lower() if parts else ""
+        if executable in {"codex", "codex.exe"}:
+            raise RuntimeError(
+                "direct Codex CLI execution is disabled; use codex_app_server"
+            )
         return parts
 
     def _build_prompt(

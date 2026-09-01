@@ -1,5 +1,7 @@
 import sys
 
+import pytest
+
 from harness.agent_runner import RoundOutput, SubAgentCommandRunner
 from harness.agent_runner import parse_approval_required
 from harness.approval import ApprovalGate, ProposedOperation
@@ -49,18 +51,16 @@ def test_sub_agent_command_runner_uses_generic_command_and_counts_call(tmp_path)
     assert session.cost.agent_calls == 1
 
 
-def test_codex_command_is_built_safely(tmp_path):
+def test_codex_command_is_not_built_as_a_direct_subprocess(tmp_path):
     session = ResearchSession.new("codex command test")
     session.research_dir = str(tmp_path)
     config = HarnessConfig(project_root=tmp_path, sub_agent_command="codex")
-    command = SubAgentCommandRunner(config)._build_command(session)
-    assert command[:2] == ["codex", "exec"]
-    assert "--cd" in command
-    assert str(tmp_path) in command
-    assert "--sandbox" in command
-    assert "workspace-write" in command
-    assert "--ask-for-approval" in command
-    assert "never" in command
+
+    with pytest.raises(
+        RuntimeError,
+        match="direct Codex CLI execution is disabled; use codex_app_server",
+    ):
+        SubAgentCommandRunner(config)._build_command(session)
 
 
 class NoticeRunner:

@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from harness.codex_app_server import CodexAppServerSettings
 from harness.config import HarnessConfig
 from harness.provider_executor import RuntimeSettings
 from harness.sandbox import sandbox_capability
@@ -33,7 +34,7 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
         if command
     ]
     generic_commands = [
-        command for command in configured_commands if not _is_bare_codex(command)
+        command for command in configured_commands if not _is_codex_command(command)
     ]
     if generic_commands:
         sandbox_ok, sandbox_detail = sandbox_capability(config)
@@ -49,9 +50,9 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
     else:
         sandbox_ok = True
         sandbox_detail = (
-            "not required; all configured commands use the Codex sandbox"
+            "not required; Codex uses App Server sandbox policy"
             if configured_commands
-            else "not required; no real-agent command configured"
+            else "not required; no generic real-agent command configured"
         )
         unsandboxed_ok = True
         unsandboxed_detail = "not applicable"
@@ -60,12 +61,18 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
     selected = set(runtime.global_order)
     for order in runtime.role_orders.values():
         selected.update(order)
+    selected.update(_configured_runtime_providers())
     if not selected:
         for command_text in configured_commands:
-            executable = Path(shlex.split(command_text)[0]).name
-            selected.add("codex_cli" if executable == "codex" else "cli")
+            executable = Path(shlex.split(command_text)[0]).name.lower()
+            selected.add(
+                "codex_app_server"
+                if executable in {"codex", "codex.exe"}
+                else "cli"
+            )
 
     openai_selected = bool({"openai_responses", "openai_computer"} & selected)
+    codex_selected = bool({"codex_cli", "codex_app_server"} & selected)
     computer_ready = (
         not runtime.computer_enabled
         or (
@@ -77,6 +84,16 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
     )
     codex_home = os.getenv("CODEX_HOME")
     codex_home_detail = codex_home or "未設定（Codex既定値）"
+    try:
+        app_server_settings = CodexAppServerSettings.from_environment(
+            config.project_root
+        )
+        app_server_ok = True
+        app_server_detail = " ".join(app_server_settings.command)
+    except Exception as exc:
+        app_server_settings = None
+        app_server_ok = False
+        app_server_detail = f"{type(exc).__name__}: {exc}"
 
     checks = [
         DoctorCheck("project_root", config.project_root.exists(), str(config.project_root)),
@@ -111,6 +128,11 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
             _format_provider_orders(runtime, selected),
         ),
         DoctorCheck(
+            "codex_app_server_config",
+            (not codex_selected) or app_server_ok,
+            "not selected" if not codex_selected else app_server_detail,
+        ),
+        DoctorCheck(
             "openai_responses",
             (not openai_selected)
             or (bool(runtime.openai_api_key) and bool(runtime.openai_model)),
@@ -140,7 +162,7 @@ def run_doctor(config: HarnessConfig) -> list[DoctorCheck]:
         ),
         DoctorCheck(
             "codex_home",
-            ("codex_cli" not in selected) or bool(codex_home),
+            (not codex_selected) or bool(codex_home),
             codex_home_detail,
         ),
         DoctorCheck(
@@ -230,6 +252,32 @@ def render_doctor(checks: list[DoctorCheck]) -> str:
     return "\n".join(lines)
 
 
+def _configured_runtime_providers() -> set[str]:
+    result: set[str] = set()
+    for name in (
+        "AGENT_RUNTIME_ORDER",
+        "MAIN_AGENT_RUNTIME_ORDER",
+        "SUB_AGENT_RUNTIME_ORDER",
+        "REVIEW_AGENT_RUNTIME_ORDER",
+        "FRESH_AGENT_RUNTIME_ORDER",
+        "PLANNING_AGENT_RUNTIME_ORDER",
+        "CLAUDE_AGENT_RUNTIME_ORDER",
+    ):
+        for value in os.getenv(name, "").split(","):
+            normalized = value.strip().lower().replace("-", "_")
+            if normalized in {
+                "codex",
+                "codex_cli",
+                "codex_appserver",
+                "appserver",
+                "app_server",
+            }:
+                result.add("codex_app_server")
+            elif normalized:
+                result.add(normalized)
+    return result
+
+
 def _format_provider_orders(runtime: RuntimeSettings, selected: set[str]) -> str:
     parts = [
         "global=" + (",".join(runtime.global_order) if runtime.global_order else "inferred")
@@ -263,9 +311,9 @@ def _command_check(name: str, command: list[str]) -> DoctorCheck:
     return DoctorCheck(name, completed.returncode == 0, detail)
 
 
-def _is_bare_codex(command_text: str) -> bool:
+def _is_codex_command(command_text: str) -> bool:
     try:
         parts = shlex.split(command_text)
     except ValueError:
         return False
-    return len(parts) == 1 and Path(parts[0]).name == "codex"
+    return bool(parts) and Path(parts[0]).name.lower() in {"codex", "codex.exe"}

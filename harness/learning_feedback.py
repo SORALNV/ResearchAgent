@@ -57,20 +57,26 @@ class LearningResultFeedbackAdapter:
             digest = hashlib.sha256(
                 f"{type(exc).__name__}:{exc}".encode("utf-8")
             ).hexdigest()[:16]
-            self.store.append_event(
-                event_type=IterationMemoEngine.MEMO_FAILED_EVENT,
-                lane=EventLane.STATUS,
-                project_id=job.spec.project_id,
-                work_session_id=job.spec.work_session_id,
-                job_id=job.job_id,
-                actor="agent:iteration-memo",
-                payload={
-                    "result_ref": outcome.result_ref,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "experiment_completion_preserved": True,
-                },
-                idempotency_key=f"kaggle-memo:{job.job_id}:failed:{digest}",
-            )
+            try:
+                self.store.append_event(
+                    event_type=IterationMemoEngine.MEMO_FAILED_EVENT,
+                    lane=EventLane.STATUS,
+                    project_id=job.spec.project_id,
+                    work_session_id=job.spec.work_session_id,
+                    job_id=job.job_id,
+                    actor="agent:iteration-memo",
+                    payload={
+                        "result_ref": outcome.result_ref,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "experiment_completion_preserved": True,
+                    },
+                    idempotency_key=f"kaggle-memo:{job.job_id}:failed:{digest}",
+                )
+            except Exception:
+                # Memo observability is subordinate to the canonical experiment
+                # result. Even a damaged learning/event path must not turn an
+                # already collected experiment into a scheduler failure.
+                pass
         return outcome
 
     def last_memo(self, job_id: str) -> IterationMemo | None:

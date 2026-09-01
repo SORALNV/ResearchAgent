@@ -4,10 +4,15 @@ import os
 from typing import Any, Mapping
 
 from harness.config import HarnessConfig
-from harness.iteration_memo import IterationMemoEngine, ProviderIterationMemoPlanner
+from harness.iteration_memo import (
+    IterationMemoEngine,
+    ProviderIterationMemoPlanner,
+    RuleBasedIterationMemoPlanner,
+)
 from harness.kaggle_methodbook import MethodCardStore
 from harness.learning_feedback import LearningResultFeedbackAdapter
 from harness.methodbook_natural import attach_methodbook_context
+from harness.methodbook_planner import MethodBookAwareMemoPlanner
 from harness.natural_channel_service_v2 import NaturalChannelService
 
 
@@ -41,16 +46,26 @@ def attach_iteration_learning(
         return service
 
     method_store = MethodCardStore.from_environment(config.project_root, source)
-    planner = None
+    provider_planner = None
     if _bool_value(source.get("ITERATION_MEMO_PROVIDER_ENABLED"), True) and _provider_configured(
         config, source
     ):
-        planner = ProviderIterationMemoPlanner(config)
+        provider_planner = ProviderIterationMemoPlanner(config)
+    planner = (
+        MethodBookAwareMemoPlanner(provider_planner, method_store)
+        if provider_planner is not None
+        else None
+    )
+    fallback_planner = MethodBookAwareMemoPlanner(
+        RuleBasedIterationMemoPlanner(),
+        method_store,
+    )
     memo_engine = IterationMemoEngine(
         service.router.store,
         method_store.root,
         method_store,
         planner=planner,
+        fallback_planner=fallback_planner,
     )
     learning = LearningResultFeedbackAdapter(feedback, memo_engine)
 

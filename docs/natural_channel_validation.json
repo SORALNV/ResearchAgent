@@ -1,0 +1,9 @@
+{
+  "validated": true,
+  "python": "3.12",
+  "pytest": "passed",
+  "container_linux_amd64": "passed",
+  "container_linux_arm64": "passed",
+  "active_discord_strategy_mode": false,
+  "channel_registry": "CONTROL_PLANE_DIR/channel_sessions.json"
+}

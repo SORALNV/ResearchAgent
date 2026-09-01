@@ -7,6 +7,11 @@ from typing import Any, Mapping
 from harness.codex_app_server import CodexAppServerBusy
 from harness.discord_channel_map import DiscordLocation, UnmappedDiscordChannelError
 from harness.discord_markdown import compact_discord_markdown
+from harness.natural_channel_service_v2 import (
+    _explicit_paper_intent,
+    _explicit_run_intent,
+    _explicit_submit_intent,
+)
 
 
 class NaturalChannelDiscordBotAdapter:
@@ -165,15 +170,18 @@ class NaturalChannelDiscordBotAdapter:
             await remember_target(location, message.channel)
             title = channel.subject
 
+            action_message = _requires_fresh_turn(str(message.content))
             try:
-                steered = await asyncio.to_thread(
-                    self.service.try_steer_codex,
-                    location,
-                    message_id=str(message.id),
-                    actor_id=str(message.author.id),
-                    text=str(message.content),
-                    title=title,
-                )
+                steered = None
+                if not action_message:
+                    steered = await asyncio.to_thread(
+                        self.service.try_steer_codex,
+                        location,
+                        message_id=str(message.id),
+                        actor_id=str(message.author.id),
+                        text=str(message.content),
+                        title=title,
+                    )
                 if steered is not None:
                     await send_chunks(
                         message.channel,
@@ -587,6 +595,14 @@ class NaturalChannelDiscordBotAdapter:
             print(f"Logged in as {client.user}")
 
         client.run(self.token)
+
+
+def _requires_fresh_turn(text: str) -> bool:
+    return (
+        _explicit_run_intent(text)
+        or _explicit_submit_intent(text)
+        or _explicit_paper_intent(text)
+    )
 
 
 def _format_codex_status(state: Mapping[str, Any]) -> str:

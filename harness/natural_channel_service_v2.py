@@ -176,11 +176,12 @@ class NaturalConversationHandler:
         )
         workspace.mkdir(parents=True, exist_ok=True)
         runtime_session = ResearchSession.new(
-            ingress.route.work_session.title,
-            project_name=(
-                "KaggleAgent" if self.domain == Domain.KAGGLE else "ResearchAgent"
-            ),
+            ingress.route.work_session.title
         )
+        if hasattr(runtime_session, "project_name"):
+            runtime_session.project_name = (
+                "KaggleAgent" if self.domain == Domain.KAGGLE else "ResearchAgent"
+            )
         runtime_session.session_id = ingress.route.work_session.work_session_id
         runtime_session.research_dir = str(workspace)
         invocation = self.executor.run(

@@ -25,7 +25,7 @@ def test_doctor_does_not_require_bubblewrap_for_bare_codex(tmp_path, monkeypatch
     sandbox = _check(run_doctor(config), "agent_os_sandbox")
 
     assert sandbox.ok is True
-    assert "Codex sandbox" in sandbox.detail
+    assert "App Server sandbox policy" in sandbox.detail
 
 
 def test_doctor_rejects_unsandboxed_generic_command(tmp_path):

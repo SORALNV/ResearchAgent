@@ -363,7 +363,7 @@ def test_official_handshake_and_thread_resume_wire_shape(tmp_path: Path):
         {
             "type": "text",
             "text": "inspect the repository",
-            "textElements": [],
+            "text_elements": [],
         }
     ]
     assert "text_elements" not in json.dumps(turn_params)
@@ -396,7 +396,7 @@ def test_active_turn_supports_steer_interrupt_approval_and_native_subagents(
     assert response["turn_id"] == active_turn
     steer = fake.requests("turn/steer")[-1]
     assert steer["params"]["expectedTurnId"] == active_turn
-    assert steer["params"]["input"][0]["textElements"] == []
+    assert steer["params"]["input"][0]["text_elements"] == []
 
     fake.request_command_approval()
     _wait(lambda: bool(runtime.pending_approvals(session_id="WS-2")))

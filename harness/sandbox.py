@@ -24,29 +24,20 @@ def build_agent_command(
 ) -> list[str]:
     """Build an argv-only command with an explicit sandbox policy.
 
-    Bare ``codex`` uses Codex's own sandbox. Generic commands can be wrapped
-    in bubblewrap. Unsandboxed generic execution is rejected unless explicitly
-    enabled.
+    Codex commands are deliberately rejected here. Codex is a protocol-backed
+    provider owned by ``CodexAppServerRuntime``; generic subprocess execution is
+    retained only for explicitly configured non-Codex tools.
     """
 
     parts = shlex.split(command_text)
     if not parts:
         raise ValueError("agent command is empty")
 
-    executable = Path(parts[0]).name
-    if executable == "codex" and len(parts) == 1:
-        return [
-            parts[0],
-            "exec",
-            "--cd",
-            str(working_dir),
-            "--skip-git-repo-check",
-            "--sandbox",
-            sandbox_mode,
-            "--ask-for-approval",
-            "never",
-            "-",
-        ]
+    executable = Path(parts[0]).name.lower()
+    if executable in {"codex", "codex.exe"}:
+        raise SandboxUnavailableError(
+            "direct Codex CLI execution is disabled; use the codex_app_server provider"
+        )
 
     backend = config.agent_sandbox_backend
     if backend == "auto":

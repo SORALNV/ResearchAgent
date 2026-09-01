@@ -1,4 +1,4 @@
-"""Public channel-native workflow API with iteration-learning integration."""
+"""Public channel-native workflow API with learning and production hardening."""
 
 from harness.natural_channel_service_v2 import *  # noqa: F401,F403
 from harness.natural_channel_service_v2 import (
@@ -17,8 +17,14 @@ def build_natural_channel_service(config, base_service, *, environ=None):
     )
     from harness.learning_integration import attach_iteration_learning
 
-    return attach_iteration_learning(
+    service = attach_iteration_learning(
         service,
         config,
+        environ=environ,
+    )
+    from harness.production_hardening import apply_production_hardening
+
+    return apply_production_hardening(
+        service,
         environ=environ,
     )

@@ -1,63 +1,53 @@
 """Compatibility facade for the official Codex App Server v2 runtime.
 
-The protocol implementation lives in :mod:`harness.codex_app_server_v2`.  This
-module preserves the repository's existing imports and adds the small amount of
+The implementation lives in :mod:`harness.codex_app_server_v2`. This module
+keeps the repository's existing imports stable and adds the small amount of
 coordination needed when a Discord steer arrives while ``turn/start`` is still
 being acknowledged by App Server.
+
+Wire payloads are pinned to the generated v2 schema from ``openai/codex``.
+Notably, ``UserInput`` uses the snake-case ``text_elements`` field. App Server
+owns Codex Core/Harness behavior, including native collaboration/subagent
+items; ResearchAgent forwards those events rather than implementing another
+Codex protocol.
 """
 
 from __future__ import annotations
 
 import atexit
-import os
-import shlex
 import threading
-from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from harness import codex_app_server_v2 as _impl
 from harness.codex_app_server_v2 import *  # noqa: F401,F403
 
 
-class CodexAppServerSettings(_impl.CodexAppServerSettings):
-    """Settings with an explicit diagnostic for the removed ``codex exec`` path."""
+def _official_text_input(text: str) -> dict[str, Any]:
+    """Return the generated v2 ``UserInput`` text variant exactly."""
 
-    @classmethod
-    def from_environment(
-        cls,
-        project_root: str | Path,
-        environ: Mapping[str, str] | None = None,
-    ) -> "CodexAppServerSettings":
-        source = dict(os.environ if environ is None else environ)
-        raw_command = source.get(
-            "CODEX_APP_SERVER_COMMAND",
-            "codex app-server --listen stdio://",
-        )
-        try:
-            command = tuple(shlex.split(raw_command))
-        except ValueError:
-            command = ()
-        if (
-            command
-            and Path(command[0]).name.lower() in {"codex", "codex.exe"}
-            and "exec" in command[1:]
-        ):
-            raise ValueError("codex exec is disabled; use codex app-server")
-        base = _impl.CodexAppServerSettings.from_environment(
-            project_root,
-            source,
-        )
-        return cls(**base.__dict__)
+    return {"type": "text", "text": str(text), "text_elements": []}
+
+
+# The implementation resolves this module-global helper at call time for both
+# turn/start and turn/steer. Replacing it here corrects the wire field without
+# duplicating the App Server client, thread, approval, or event machinery.
+_impl._text_input = _official_text_input
 
 
 class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
-    """Runtime that makes the ``turn/start``/``turn/steer`` boundary race-safe."""
+    """Race-safe facade over the official App Server runtime.
+
+    A Discord message can arrive immediately after the first message starts a
+    turn. In that narrow window ``turn/start`` may not yet have returned the
+    turn ID. Waiting briefly for registration lets the second message use the
+    official ``turn/steer`` method instead of creating another turn.
+    """
 
     def __init__(
         self,
         settings: CodexAppServerSettings,
         *,
-        process_factory: _impl.ProcessFactory | None = None,
+        process_factory: ProcessFactory | None = None,
     ) -> None:
         super().__init__(settings, process_factory=process_factory)
         self._starting_guard = threading.RLock()
@@ -72,9 +62,8 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
             if event is not None:
                 event.set()
 
-        # The client is private to this runtime. Wrapping registration keeps the
-        # official wire protocol untouched while allowing an immediately
-        # following Discord message to wait for the returned turn ID and steer it.
+        # The client is private to this runtime. Wrapping registration changes
+        # no App Server request or notification shape.
         self.client.register_turn = register_and_signal  # type: ignore[method-assign]
 
     def run_turn(
@@ -85,11 +74,13 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
         stage: str,
         task_id: str | None,
         prompt: str,
-        cwd: str | Path,
+        cwd,
         sandbox: str,
-        cancellation: Any | None = None,
+        cancellation=None,
         client_user_message_id: str | None = None,
-    ) -> _impl.CodexTurnResult:
+    ) -> CodexTurnResult:
+        from pathlib import Path
+
         workspace = Path(cwd).expanduser().resolve()
         binding_key = _impl._binding_key(
             session_id=session_id,
@@ -126,7 +117,7 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
                         self._starting_by_binding.pop(binding_key, None)
                 event.set()
 
-    def _discord_run(self, session_id: str) -> Any | None:
+    def _discord_run(self, session_id: str):
         active = super()._discord_run(session_id)
         if active is not None:
             return active
@@ -170,7 +161,7 @@ def reset_shared_codex_app_servers() -> None:
 
 
 class CodexAppServerAgentExecutor(_impl.CodexAppServerAgentExecutor):
-    """Existing Harness executor contract backed by the shared race-safe runtime."""
+    """Existing Harness executor contract backed by the shared runtime."""
 
     def __init__(
         self,

@@ -581,7 +581,14 @@ def _safe_event_payload(event: CodexRuntimeEvent) -> dict[str, Any]:
                     "status": str(item.get("status") or ""),
                 }
             )
-            if item_type == "commandExecution":
+            if item_type == "agentMessage":
+                payload.update(
+                    {
+                        "text": str(item.get("text") or "")[:4000],
+                        "phase": str(item.get("phase") or ""),
+                    }
+                )
+            elif item_type == "commandExecution":
                 payload.update(
                     {
                         "command": str(item.get("command") or "")[:4000],
@@ -727,6 +734,13 @@ def _format_event_for_discord(
             return f"Codex Harness multi-agent event: `{item_type}`"
     if method == "item/completed":
         item_type = str(payload.get("item_type") or "")
+        if item_type == "agentMessage":
+            # Only user-facing commentary is forwarded. Raw reasoning
+            # items and the final answer remain on their existing paths.
+            text = str(payload.get("text") or "").strip()
+            if str(payload.get("phase") or "") == "commentary" and text:
+                return text[:1900]
+            return None
         if item_type == "commandExecution":
             return (
                 "Codex command completed: status=`"

@@ -130,4 +130,7 @@ def test_active_discord_entrypoint_has_no_strategy_mode_commands() -> None:
     assert 'name="submit"' not in adapter
     assert 'name="paper"' not in adapter
     assert 'name="gate"' not in adapter
-    assert "create_threads=_bool_env(\"DISCORD_CREATE_THREADS\", False)" in main
+    assert "create_threads=_bool_env(\"DISCORD_EXECUTION_THREADS\", True)" in main
+    assert 'name="help"' in adapter
+    assert 'name="readiness"' in adapter
+    assert 'name="job"' in adapter and 'name="list"' in adapter

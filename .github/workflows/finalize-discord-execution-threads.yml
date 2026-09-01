@@ -120,6 +120,32 @@ jobs:
               progress_block,
           )
 
+          help_block = dedent(r'''
+          def build_help_message(service: Any, location: DiscordLocation) -> str:
+              registry = getattr(service, "registry", None)
+              config = registry.get(location) if registry is not None else None
+              context = (
+                  f"{config.subject} (`{config.domain.value}`)"
+                  if config is not None
+                  else "未設定チャンネル"
+              )
+              return (
+                  f"**ResearchAgent Help — {context}**\n"
+                  "**通常会話:** 仮説相談、`これを実装して試して`、結果解釈、`このCSVで提出しよう`、`この結果を論文にまとめて`。実行依頼は専用Threadを作り、途中経過を流します。\n"
+                  "**案件:** `/agent help` · `/agent setup` · `/agent channel` · `/agent status` · `/agent readiness` · `/agent finish`\n"
+                  "**Job:** `/agent job list` · `/agent compute_backends` · `/agent approve_compute` · `/agent cancel_job`\n"
+                  "**Codex:** `/agent codex_status` · `/agent steer` · `/agent interrupt` · `/agent codex_approvals` · `/agent codex_approval`"
+              )
+
+
+          ''').lstrip()
+          replace_range(
+              "harness/discord_execution_ui.py",
+              "def build_help_message(",
+              "def build_readiness_message(",
+              help_block,
+          )
+
           steer_block = indent(
               dedent('''
               # Ordinary follow-ups may steer a running turn. Explicit

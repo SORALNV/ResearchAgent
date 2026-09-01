@@ -49,7 +49,10 @@ _ACTION_KINDS = {
 _RUN_RE = re.compile(
     r"(?:実装(?:して|する|しよう)|実行(?:して|する|しよう)|回して|試して|"
     r"やって(?:みて|ください|くれ)?|進めて|開始して|採用(?:して|する)|"
-    r"この案で|これで(?:行こう|いこう)|run\b|execute\b|try\b)",
+    r"(?:改修|修正|追加|変更|更新|作成|導入|反映|適用|統合|マージ|コミット|プッシュ)"
+    r"(?:して|してください|してほしい|をお願い(?:します)?)|直して|取り込んで|作って|"
+    r"この案で|これで(?:行こう|いこう)|run\b|execute\b|try\b|"
+    r"fix\b|update\b|implement\b|build\b|apply\b|merge\b|commit\b|push\b)",
     re.IGNORECASE,
 )
 _SUBMIT_RE = re.compile(

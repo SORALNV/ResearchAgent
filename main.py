@@ -213,7 +213,7 @@ def main() -> None:
             CodexAppServerDiscordBotAdapter(
                 token=token,
                 service=service,
-                create_threads=_bool_env("DISCORD_CREATE_THREADS", False),
+                create_threads=_bool_env("DISCORD_EXECUTION_THREADS", True),
                 log_channel_id=config.discord_log_channel_id,
             ).run()
         finally:

@@ -88,9 +88,18 @@ DISCORD_KAGGLE_CHANNEL_IDS=
 They do not contain a meaningful subject, so `/agent setup` or
 `DISCORD_CHANNEL_SESSIONS_JSON` is preferred.
 
-`DISCORD_CREATE_THREADS` defaults to `false`. The Edge never creates a new
-Discord thread merely because a user sends a message. Creating and organizing
-channels is a Discord-side operation controlled by the user.
+`DISCORD_EXECUTION_THREADS=true` creates a child Discord Thread only for an
+explicit execution, submission, or paper-generation request. The configured
+parent channel remains the single Project, WorkSession, and durable Codex chat;
+the child Thread is a scoped live log for that one execution. It receives safe
+user-facing Codex commentary, command/file milestones, the final response, and
+subsequent Job status changes. It does not receive hidden chain-of-thought or raw
+reasoning tokens.
+
+Discord does not support nested Threads. When the configured work context is
+already a Discord Thread, that Thread is reused as the execution log. The
+historical `DISCORD_CREATE_THREADS` variable is retained only for configuration
+compatibility.
 
 ## Ordinary conversation and execution
 
@@ -154,6 +163,9 @@ The active command surface is deliberately small:
 /agent setup
 /agent channel
 /agent status
+/agent help
+/agent readiness
+/agent job list
 /agent finish
 /agent codex_status
 /agent steer

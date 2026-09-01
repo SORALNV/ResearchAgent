@@ -6,6 +6,17 @@ from typing import Any, Mapping
 
 from harness.codex_app_server import CodexAppServerBusy
 from harness.discord_channel_map import DiscordLocation, UnmappedDiscordChannelError
+from harness.discord_execution_ui import (
+    ExecutionThreadRegistry,
+    build_help_message,
+    build_job_list_message,
+    build_readiness_message,
+    execution_opening_message,
+    execution_thread_name,
+    format_job_progress,
+    job_is_terminal,
+    job_progress_key,
+)
 from harness.discord_markdown import compact_discord_markdown
 from harness.natural_channel_service_v2 import (
     _explicit_paper_intent,
@@ -27,9 +38,9 @@ class NaturalChannelDiscordBotAdapter:
     ) -> None:
         self.token = token
         self.service = service
-        # Kept for configuration compatibility. Channel-native mode never creates
-        # a new Discord thread implicitly; the user creates/archives channels.
-        self.create_threads = False
+        # One configured channel remains one WorkSession. When enabled, each
+        # explicit execution gets a child Discord Thread used only as its live log.
+        self.create_threads = bool(create_threads)
         self.log_channel_id = int(log_channel_id) if log_channel_id else None
 
     def run(self) -> None:
@@ -47,6 +58,8 @@ class NaturalChannelDiscordBotAdapter:
         tree = app_commands.CommandTree(client)
         locks: dict[str, asyncio.Lock] = {}
         session_targets: dict[str, Any] = {}
+        execution_registry = ExecutionThreadRegistry(self.service.registry.root)
+        job_watchers: dict[str, asyncio.Task[Any]] = {}
         event_loop: asyncio.AbstractEventLoop | None = None
 
         async def send_chunks(channel: Any, message: str) -> None:
@@ -74,7 +87,7 @@ class NaturalChannelDiscordBotAdapter:
             except Exception:
                 return
 
-        def location_from_channel(guild: Any, channel: Any) -> DiscordLocation:
+        def raw_location_from_channel(guild: Any, channel: Any) -> DiscordLocation:
             if guild is None:
                 raise ValueError("Discord guild context is required")
             parent_id = getattr(channel, "parent_id", None)
@@ -85,6 +98,14 @@ class NaturalChannelDiscordBotAdapter:
                 parent_channel_id=(str(parent_id) if parent_id is not None else None),
                 thread_id=str(channel.id) if is_thread else None,
             )
+
+        def location_from_channel(guild: Any, channel: Any) -> DiscordLocation:
+            raw = raw_location_from_channel(guild, channel)
+            if isinstance(channel, discord.Thread):
+                record = execution_registry.get(str(channel.id))
+                if record is not None:
+                    return record.parent_location()
+            return raw
 
         def interaction_location(interaction: Any) -> DiscordLocation:
             return location_from_channel(interaction.guild, interaction.channel)
@@ -102,6 +123,16 @@ class NaturalChannelDiscordBotAdapter:
             target = session_targets.get(session_id)
             if target is not None:
                 return target
+            latest = execution_registry.latest_for_session(session_id)
+            if latest is not None and latest.status in {"active", "watching"}:
+                try:
+                    target = client.get_channel(int(latest.thread_id))
+                    if target is None:
+                        target = await client.fetch_channel(int(latest.thread_id))
+                    session_targets[session_id] = target
+                    return target
+                except Exception:
+                    pass
             try:
                 session = await asyncio.to_thread(
                     self.service.router.store.get_work_session,
@@ -144,6 +175,137 @@ class NaturalChannelDiscordBotAdapter:
                 loop,
             )
 
+        async def watch_job(
+            *,
+            thread_id: str,
+            target: Any,
+            job_id: str,
+        ) -> None:
+            key = f"{thread_id}:{job_id}"
+            previous: tuple[str, ...] | None = None
+            try:
+                while True:
+                    job = await asyncio.to_thread(
+                        self.service.router.store.get_job,
+                        job_id,
+                    )
+                    runtime_store = getattr(
+                        getattr(self.service, "compute", None),
+                        "runtime_store",
+                        None,
+                    )
+                    runtime = (
+                        await asyncio.to_thread(runtime_store.load, job_id)
+                        if runtime_store is not None
+                        else None
+                    )
+                    current = job_progress_key(job, runtime=runtime)
+                    if current != previous:
+                        await send_chunks(
+                            target,
+                            format_job_progress(job, runtime=runtime),
+                        )
+                        previous = current
+                    if job_is_terminal(job):
+                        break
+                    await asyncio.sleep(5)
+                record = execution_registry.get(thread_id)
+                if record is not None and record.job_ids:
+                    jobs = [
+                        await asyncio.to_thread(
+                            self.service.router.store.get_job,
+                            item,
+                        )
+                        for item in record.job_ids
+                    ]
+                    if all(job_is_terminal(item) for item in jobs):
+                        final_status = (
+                            "failed"
+                            if any(
+                                job_progress_key(item)[0] in {"failed", "cancelled"}
+                                for item in jobs
+                            )
+                            else "completed"
+                        )
+                        execution_registry.set_status(thread_id, final_status)
+                        if session_targets.get(record.work_session_id) is target:
+                            session_targets.pop(record.work_session_id, None)
+            except Exception as exc:
+                await log(
+                    f"job watcher failed thread={thread_id} job={job_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            finally:
+                job_watchers.pop(key, None)
+
+        def start_job_watcher(
+            *,
+            thread_id: str,
+            target: Any,
+            job_id: str,
+        ) -> None:
+            key = f"{thread_id}:{job_id}"
+            current = job_watchers.get(key)
+            if current is not None and not current.done():
+                return
+            job_watchers[key] = asyncio.create_task(
+                watch_job(
+                    thread_id=thread_id,
+                    target=target,
+                    job_id=job_id,
+                )
+            )
+
+        async def create_execution_target(
+            message: Any,
+            location: DiscordLocation,
+            channel_config: Any,
+            action_kind: str,
+        ) -> tuple[Any, Any | None]:
+            opening = execution_opening_message(
+                subject=channel_config.subject,
+                action_kind=action_kind,
+                request_text=str(message.content),
+            )
+            if not self.create_threads or isinstance(message.channel, discord.Thread):
+                await send_chunks(message.channel, opening)
+                return message.channel, execution_registry.get(str(message.channel.id))
+            try:
+                thread = await message.create_thread(
+                    name=execution_thread_name(
+                        channel_config.subject,
+                        action_kind,
+                        str(message.id),
+                    ),
+                    auto_archive_duration=1440,
+                )
+                record = execution_registry.bind(
+                    thread_id=str(thread.id),
+                    location=location,
+                    work_session_id=channel_config.work_session_id,
+                    source_message_id=str(message.id),
+                    action_kind=action_kind,
+                    subject=channel_config.subject,
+                )
+                session_targets[channel_config.work_session_id] = thread
+                await send_chunks(thread, opening)
+                await send_chunks(
+                    message.channel,
+                    f"**実行用Thread:** {thread.mention}",
+                )
+                return thread, record
+            except Exception as exc:
+                await log(
+                    f"execution thread creation failed message={message.id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                await send_chunks(
+                    message.channel,
+                    "**実行用Threadを作成できなかったため、このチャンネルへ進捗を送ります。**",
+                )
+                await send_chunks(message.channel, opening)
+                return message.channel, None
+
         @client.event
         async def on_message(message: Any) -> None:
             if (
@@ -167,10 +329,27 @@ class NaturalChannelDiscordBotAdapter:
                     "**この案件は終了済みです。** 新しい案件は新しいDiscordチャンネルでセットしてください。",
                 )
                 return
-            await remember_target(location, message.channel)
             title = channel.subject
-
-            action_message = _requires_fresh_turn(str(message.content))
+            action_kind = _execution_action_kind(str(message.content))
+            action_message = action_kind is not None
+            progress_target = message.channel
+            execution_record = None
+            before_job_ids = {
+                item.job_id
+                for item in self.service.router.store.list_jobs(
+                    work_session_id=channel.work_session_id
+                )
+            }
+            if action_kind is not None:
+                progress_target, execution_record = await create_execution_target(
+                    message,
+                    location,
+                    channel,
+                    action_kind,
+                )
+                await remember_target(location, progress_target)
+            else:
+                await remember_target(location, message.channel)
             try:
                 steered = None
                 if not action_message:
@@ -199,23 +378,26 @@ class NaturalChannelDiscordBotAdapter:
             lock = locks.setdefault(location.conversation_id, asyncio.Lock())
             async with lock:
                 try:
-                    # Recheck after lock acquisition so a closely arriving message
-                    # becomes official turn/steer input rather than a queued turn.
-                    steered = await asyncio.to_thread(
-                        self.service.try_steer_codex,
-                        location,
-                        message_id=str(message.id),
-                        actor_id=str(message.author.id),
-                        text=str(message.content),
-                        title=title,
-                    )
+                    # Ordinary follow-ups may steer a running turn. Explicit
+                    # execution requests wait for the channel lock and start their own
+                    # natural-action turn so the Job/final-action contract is preserved.
+                    steered = None
+                    if not action_message:
+                        steered = await asyncio.to_thread(
+                            self.service.try_steer_codex,
+                            location,
+                            message_id=str(message.id),
+                            actor_id=str(message.author.id),
+                            text=str(message.content),
+                            title=title,
+                        )
                     if steered is not None:
                         await send_chunks(
                             message.channel,
                             f"**途中指示を反映しました。** turn `{steered.turn_id}`",
                         )
                         return
-                    async with message.channel.typing():
+                    async with progress_target.typing():
                         result = await asyncio.to_thread(
                             self.service.handle_message,
                             location,
@@ -224,14 +406,51 @@ class NaturalChannelDiscordBotAdapter:
                             text=str(message.content),
                             title=title,
                         )
-                    await send_chunks(message.channel, result.message)
+                    await send_chunks(progress_target, result.message)
+                    if action_kind is not None:
+                        after_jobs = self.service.router.store.list_jobs(
+                            work_session_id=channel.work_session_id
+                        )
+                        new_job_ids = [
+                            item.job_id
+                            for item in after_jobs
+                            if item.job_id not in before_job_ids
+                        ]
+                        target_id = str(getattr(progress_target, "id", message.channel.id))
+                        if execution_record is not None and new_job_ids:
+                            execution_registry.bind_jobs(
+                                execution_record.thread_id,
+                                new_job_ids,
+                            )
+                            execution_registry.set_status(
+                                execution_record.thread_id,
+                                "watching",
+                            )
+                        for job_id in new_job_ids:
+                            start_job_watcher(
+                                thread_id=target_id,
+                                target=progress_target,
+                                job_id=job_id,
+                            )
+                        if execution_record is not None and not new_job_ids:
+                            execution_registry.set_status(
+                                execution_record.thread_id,
+                                "completed",
+                            )
+                            if session_targets.get(channel.work_session_id) is progress_target:
+                                session_targets.pop(channel.work_session_id, None)
                 except UnmappedDiscordChannelError as exc:
-                    await send_chunks(message.channel, str(exc))
+                    await send_chunks(progress_target, str(exc))
                 except Exception as exc:
                     await send_chunks(
-                        message.channel,
+                        progress_target,
                         f"**処理に失敗しました。** `{type(exc).__name__}: {exc}`",
                     )
+                    if execution_record is not None:
+                        execution_registry.set_status(
+                            execution_record.thread_id,
+                            "failed",
+                        )
                     await log(
                         f"handler error conversation={location.conversation_id}: "
                         f"{type(exc).__name__}: {exc}"
@@ -307,6 +526,38 @@ class NaturalChannelDiscordBotAdapter:
                 await reply(
                     interaction,
                     f"**状態取得に失敗しました。** `{type(exc).__name__}: {exc}`",
+                )
+
+        @agent.command(
+            name="help",
+            description="現行コマンドと自然文操作の使い方を表示します。",
+        )
+        async def help_command(interaction: Any) -> None:
+            await reply(
+                interaction,
+                build_help_message(
+                    self.service,
+                    interaction_location(interaction),
+                ),
+            )
+
+        @agent.command(
+            name="readiness",
+            description="Codex、Compute、保存先、Kaggle等の実行準備を確認します。",
+        )
+        async def readiness(interaction: Any) -> None:
+            await interaction.response.defer(thinking=True)
+            try:
+                message = await asyncio.to_thread(
+                    build_readiness_message,
+                    self.service,
+                    interaction_location(interaction),
+                )
+                await reply(interaction, message)
+            except Exception as exc:
+                await reply(
+                    interaction,
+                    f"**Readiness確認に失敗しました。** `{type(exc).__name__}: {exc}`",
                 )
 
         @agent.command(
@@ -514,6 +765,30 @@ class NaturalChannelDiscordBotAdapter:
                     f"**Backend取得に失敗しました。** `{type(exc).__name__}: {exc}`",
                 )
 
+        job_group = app_commands.Group(
+            name="job",
+            description="この案件の実験Jobを確認します。",
+        )
+
+        @job_group.command(
+            name="list",
+            description="この案件の実験Jobを一覧表示します。",
+        )
+        async def job_list(interaction: Any) -> None:
+            await interaction.response.defer(thinking=True)
+            try:
+                message = await asyncio.to_thread(
+                    build_job_list_message,
+                    self.service,
+                    interaction_location(interaction),
+                )
+                await reply(interaction, message)
+            except Exception as exc:
+                await reply(
+                    interaction,
+                    f"**Job一覧取得に失敗しました。** `{type(exc).__name__}: {exc}`",
+                )
+
         @agent.command(
             name="approve_compute",
             description="課金等で承認待ちのCompute Jobを許可します。",
@@ -578,6 +853,7 @@ class NaturalChannelDiscordBotAdapter:
                     f"**Job停止に失敗しました。** `{type(exc).__name__}: {exc}`",
                 )
 
+        agent.add_command(job_group)
         tree.add_command(agent)
 
         @client.event
@@ -588,6 +864,22 @@ class NaturalChannelDiscordBotAdapter:
             if callable(setter):
                 setter(codex_event_sink)
             await tree.sync()
+            for record in execution_registry.list():
+                if record.status != "watching":
+                    continue
+                try:
+                    target = client.get_channel(int(record.thread_id))
+                    if target is None:
+                        target = await client.fetch_channel(int(record.thread_id))
+                except Exception:
+                    continue
+                session_targets[record.work_session_id] = target
+                for job_id in record.job_ids:
+                    start_job_watcher(
+                        thread_id=record.thread_id,
+                        target=target,
+                        job_id=job_id,
+                    )
             await client.change_presence(
                 status=discord.Status.online,
                 activity=discord.Game(name="Research / Kaggle channels"),
@@ -597,12 +889,18 @@ class NaturalChannelDiscordBotAdapter:
         client.run(self.token)
 
 
+def _execution_action_kind(text: str) -> str | None:
+    if _explicit_submit_intent(text):
+        return "submission"
+    if _explicit_paper_intent(text):
+        return "paper"
+    if _explicit_run_intent(text):
+        return "experiment"
+    return None
+
+
 def _requires_fresh_turn(text: str) -> bool:
-    return (
-        _explicit_run_intent(text)
-        or _explicit_submit_intent(text)
-        or _explicit_paper_intent(text)
-    )
+    return _execution_action_kind(text) is not None
 
 
 def _format_codex_status(state: Mapping[str, Any]) -> str:

@@ -12,6 +12,7 @@ __pycache__
 **/.env.*
 runtime
 research_runs
+codex-home
 control_plane
 discord_work_sessions
 compute_runtime

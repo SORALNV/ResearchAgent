@@ -25,6 +25,12 @@ def test_compose_is_same_for_windows_docker_desktop_and_jetson():
     assert "cap_drop:" in body
     assert "no-new-privileges:true" in body
     assert "read_only: true" in body
+    assert "/home/researchagent:rw,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700" in body
+
+
+def test_codex_auth_state_is_excluded_from_container_build_context():
+    body = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert "codex-home" in body.splitlines()
 
 
 def test_runtime_dependencies_and_provider_configuration_are_documented():

@@ -17,6 +17,7 @@ discord_work_sessions
 compute_runtime
 final_actions
 paper_outputs
+knowledge
 worker-runtime
 sessions
 artifacts

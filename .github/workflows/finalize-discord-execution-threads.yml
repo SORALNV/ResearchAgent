@@ -19,10 +19,11 @@ jobs:
         with:
           ref: feat/discord-execution-threads
           fetch-depth: 0
-      - name: Apply marker-based follow-up fixes
+      - name: Apply validated follow-up fixes
         shell: python
         run: |
           from pathlib import Path
+          from textwrap import dedent, indent
 
           root = Path.cwd()
 
@@ -37,6 +38,8 @@ jobs:
               start_marker: str,
               end_marker: str,
               replacement: str,
+              *,
+              include_end: bool = False,
           ) -> None:
               text = read(relative)
               start = text.find(start_marker)
@@ -45,22 +48,12 @@ jobs:
               end = text.find(end_marker, start + len(start_marker))
               if end < 0:
                   raise RuntimeError(f"end marker missing in {relative}: {end_marker!r}")
+              if include_end:
+                  end += len(end_marker)
               write(relative, text[:start] + replacement + text[end:])
 
-          def replace_once(relative: str, old: str, new: str) -> None:
-              text = read(relative)
-              count = text.count(old)
-              if count != 1:
-                  raise RuntimeError(
-                      f"expected one marker in {relative}, found {count}: {old[:100]!r}"
-                  )
-              write(relative, text.replace(old, new, 1))
-
-          replace_range(
-              "harness/discord_execution_ui.py",
-              "def format_job_progress(",
-              "def job_is_terminal(",
-              '''def _runtime_progress(runtime: Any | None) -> tuple[str, float | None]:
+          progress_block = dedent(r'''
+          def _runtime_progress(runtime: Any | None) -> tuple[str, float | None]:
               handle = getattr(runtime, "handle", None) if runtime is not None else None
               stage = str(getattr(handle, "stage", "") or "")
               raw_progress = getattr(handle, "progress", None)
@@ -119,33 +112,45 @@ jobs:
               )
 
 
-          ''',
+          ''').lstrip()
+          replace_range(
+              "harness/discord_execution_ui.py",
+              "def format_job_progress(",
+              "def job_is_terminal(",
+              progress_block,
           )
 
+          steer_block = indent(
+              dedent('''
+              # Ordinary follow-ups may steer a running turn. Explicit
+              # execution requests wait for the channel lock and start their own
+              # natural-action turn so the Job/final-action contract is preserved.
+              steered = None
+              if not action_message:
+                  steered = await asyncio.to_thread(
+                      self.service.try_steer_codex,
+                      location,
+                      message_id=str(message.id),
+                      actor_id=str(message.author.id),
+                      text=str(message.content),
+                      title=title,
+                  )
+              if steered is not None:
+                  await send_chunks(
+                      message.channel,
+                      f"**途中指示を反映しました。** turn `{steered.turn_id}`",
+                  )
+                  return
+              async with progress_target.typing():
+              ''').lstrip(),
+              " " * 20,
+          )
           replace_range(
               "harness/natural_channel_discord.py",
               "                    # Recheck after lock acquisition so a closely arriving message\n",
               "                    async with progress_target.typing():\n",
-              '''                    # Ordinary follow-ups may steer a running turn. Explicit
-                                  # execution requests wait for the channel lock and start their own
-                                  # natural-action turn so the Job/final-action contract is preserved.
-                                  steered = None
-                                  if not action_message:
-                                      steered = await asyncio.to_thread(
-                                          self.service.try_steer_codex,
-                                          location,
-                                          message_id=str(message.id),
-                                          actor_id=str(message.author.id),
-                                          text=str(message.content),
-                                          title=title,
-                                      )
-                                  if steered is not None:
-                                      await send_chunks(
-                                          message.channel,
-                                          f"**途中指示を反映しました。** turn `{steered.turn_id}`",
-                                      )
-                                      return
-              ''',
+              steer_block,
+              include_end=True,
           )
 
           adapter = read("harness/natural_channel_discord.py")
@@ -163,12 +168,13 @@ jobs:
                   1,
               )
 
-          no_job_marker = '''                        if execution_record is not None and not new_job_ids:
-                                      execution_registry.set_status(
-                                          execution_record.thread_id,
-                                          "completed",
-                                      )
-          '''
+          no_job_marker = (
+              "                        if execution_record is not None and not new_job_ids:\n"
+              "                            execution_registry.set_status(\n"
+              "                                execution_record.thread_id,\n"
+              "                                \"completed\",\n"
+              "                            )\n"
+          )
           if "session_targets.get(channel.work_session_id) is progress_target" not in adapter:
               if adapter.count(no_job_marker) != 1:
                   raise RuntimeError("no-job execution-thread marker is not unique")
@@ -181,20 +187,22 @@ jobs:
               )
           write("harness/natural_channel_discord.py", adapter)
 
-          replace_range(
-              "harness/natural_channel_service_v2.py",
-              "_RUN_RE = re.compile(\n",
-              "_SUBMIT_RE = re.compile(\n",
-              '''_RUN_RE = re.compile(
+          run_regex = dedent(r'''
+          _RUN_RE = re.compile(
               r"(?:実装(?:して|する|しよう)|実行(?:して|する|しよう)|回して|試して|"
               r"やって(?:みて|ください|くれ)?|進めて|開始して|採用(?:して|する)|"
               r"(?:改修|修正|追加|変更|更新|作成|導入|反映|適用|統合|マージ|コミット|プッシュ)"
               r"(?:して|してください|してほしい|をお願い(?:します)?)|直して|取り込んで|作って|"
-              r"この案で|これで(?:行こう|いこう)|run\\b|execute\\b|try\\b|"
-              r"fix\\b|update\\b|implement\\b|build\\b|apply\\b|merge\\b|commit\\b|push\\b)",
+              r"この案で|これで(?:行こう|いこう)|run\b|execute\b|try\b|"
+              r"fix\b|update\b|implement\b|build\b|apply\b|merge\b|commit\b|push\b)",
               re.IGNORECASE,
           )
-          ''',
+          ''').lstrip()
+          replace_range(
+              "harness/natural_channel_service_v2.py",
+              "_RUN_RE = re.compile(\n",
+              "_SUBMIT_RE = re.compile(\n",
+              run_regex,
           )
 
           workflow_test = read("tests/test_natural_channel_workflow.py")

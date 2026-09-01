@@ -6,7 +6,6 @@ from pathlib import Path
 
 from harness.codex_app_server import get_shared_codex_app_server
 from harness.codex_app_server_service import CodexAppServerRoutedService
-from harness.codex_discord_adapter import CodexAppServerDiscordBotAdapter
 from harness.command_parser import parse_research_command
 from harness.commands import Command, CommandContext
 from harness.compute_models import BackendCapabilities
@@ -18,6 +17,13 @@ from harness.final_actions import build_complete_routed_service
 from harness.hardened_orchestrator import HardenedResearchOrchestrator
 from harness.kaggle_cli_transport import current_kaggle_transport_from_env
 from harness.kaggle_submission import build_kaggle_submission_pipeline
+from harness.natural_channel_discord import (
+    NaturalChannelDiscordBotAdapter as CodexAppServerDiscordBotAdapter,
+)
+from harness.natural_channel_service import (
+    NaturalChannelService,
+    build_natural_channel_service,
+)
 from harness.worker_discord_adapter import WorkerDiscordBotAdapter
 
 
@@ -34,7 +40,7 @@ def build_orchestrator(
 
 def build_routed_discord_service(
     config: HarnessConfig,
-) -> CodexAppServerRoutedService:
+) -> NaturalChannelService:
     control_plane_dir = Path(
         os.getenv("CONTROL_PLANE_DIR", "control_plane")
     ).expanduser()
@@ -49,15 +55,16 @@ def build_routed_discord_service(
         project_root=config.project_root,
         transport=current_kaggle_transport_from_env(),
     )
-    base_service = build_complete_routed_service(
+    complete_service = build_complete_routed_service(
         config,
         router,
         submission=submission,
     )
-    service = CodexAppServerRoutedService(
-        base_service,
+    app_server_service = CodexAppServerRoutedService(
+        complete_service,
         get_shared_codex_app_server(config),
     )
+    service = build_natural_channel_service(config, app_server_service)
     _configure_kaggle_backend_capabilities(service)
     if not _bool_env("LOCAL_PROCESS_COMPUTE_ENABLED", False):
         # AI-generated experiments must not share the Core process namespace by
@@ -70,7 +77,7 @@ def build_routed_discord_service(
 
 
 def _configure_kaggle_backend_capabilities(
-    service: CodexAppServerRoutedService,
+    service: NaturalChannelService,
 ) -> None:
     backend = service.compute.broker.backends.get("kaggle_notebook")
     if backend is None:
@@ -195,32 +202,26 @@ def main() -> None:
         token = args.token or config.discord_bot_token
         if not token:
             raise SystemExit("DISCORD_BOT_TOKEN or --token is required for the real bot.")
-        if _domain_routing_is_configured():
-            service = build_routed_discord_service(config)
-            service.start()
-            try:
-                CodexAppServerDiscordBotAdapter(
-                    token=token,
-                    service=service,
-                    create_threads=_bool_env("DISCORD_CREATE_THREADS", True),
-                    log_channel_id=config.discord_log_channel_id,
-                ).run()
-            finally:
-                service.stop(wait=False)
-        else:
-            WorkerDiscordBotAdapter(
-                orchestrator_factory=lambda discord: HardenedResearchOrchestrator(
-                    config,
-                    discord=discord,
-                ),
+        if args.channel_id and not _domain_routing_is_configured():
+            # Backward-compatible bootstrap for the historical single Research
+            # channel option. New deployments should use /agent setup or
+            # DISCORD_CHANNEL_SESSIONS_JSON.
+            os.environ["DISCORD_RESEARCH_CHANNEL_IDS"] = str(args.channel_id)
+        service = build_routed_discord_service(config)
+        service.start()
+        try:
+            CodexAppServerDiscordBotAdapter(
                 token=token,
-                channel_id=args.channel_id or config.discord_channel_id,
-                important_channel_id=config.discord_important_channel_id,
+                service=service,
+                create_threads=_bool_env("DISCORD_CREATE_THREADS", False),
                 log_channel_id=config.discord_log_channel_id,
-                worker_queue_size=config.discord_worker_queue_size,
             ).run()
+        finally:
+            service.stop(wait=False)
         return
 
+    # The local CLI is retained as a compatibility/maintenance interface. The
+    # active Discord product no longer exposes separate planning/execution modes.
     orchestrator = build_orchestrator(workdir, research_archive_dir)
     if args.command == "re":
         action = args.re_command
@@ -301,6 +302,7 @@ def _domain_routing_is_configured() -> bool:
     return any(
         os.getenv(name, "").strip()
         for name in (
+            "DISCORD_CHANNEL_SESSIONS_JSON",
             "DISCORD_CHANNEL_DOMAIN_MAP",
             "DISCORD_RESEARCH_CHANNEL_IDS",
             "DISCORD_KAGGLE_CHANNEL_IDS",

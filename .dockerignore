@@ -21,4 +21,6 @@ knowledge
 worker-runtime
 sessions
 artifacts
+codex-home
+**/.codex
 *.log

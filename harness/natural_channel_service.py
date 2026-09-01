@@ -24,7 +24,10 @@ def build_natural_channel_service(config, base_service, *, environ=None):
     )
     from harness.production_hardening import apply_production_hardening
 
-    return apply_production_hardening(
+    service = apply_production_hardening(
         service,
         environ=environ,
     )
+    from harness.discord_execution_ui import attach_execution_narration_prompt
+
+    return attach_execution_narration_prompt(service)

@@ -1,1 +1,0 @@
-Apply the validated execution-thread source transform.

@@ -4,6 +4,7 @@
 !deploy/.env.worker.example
 !deploy/.env.final-actions.example
 !deploy/.env.methodbook.example
+!deploy/.env.production-hardening.example
 state.json
 state.json.tmp
 sessions/
@@ -16,6 +17,8 @@ final_actions/
 paper_outputs/
 knowledge/
 worker-runtime/
+codex-home/
+**/.codex/
 __pycache__/
 .pytest_cache/
 *.pyc

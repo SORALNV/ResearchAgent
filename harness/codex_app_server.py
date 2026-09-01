@@ -4,6 +4,12 @@ The protocol implementation lives in :mod:`harness.codex_app_server_v2`.  This
 module preserves the repository's existing imports and adds the small amount of
 coordination needed when a Discord steer arrives while ``turn/start`` is still
 being acknowledged by App Server.
+
+The facade also keeps the wire payload pinned to the current generated protocol
+schema.  In particular, v2 ``UserInput`` uses ``text_elements`` (snake case),
+while ``ThreadStartParams`` and ``ThreadResumeParams`` no longer accept the
+legacy ``persistExtendedHistory`` field.  Keeping those corrections here avoids
+forking or reimplementing Codex Core/Harness behavior.
 """
 
 from __future__ import annotations
@@ -17,6 +23,18 @@ from typing import Any, Mapping
 
 from harness import codex_app_server_v2 as _impl
 from harness.codex_app_server_v2 import *  # noqa: F401,F403
+
+
+def _official_text_input(text: str) -> dict[str, object]:
+    """Build the generated v2 ``UserInput`` shape without legacy aliases."""
+
+    return {"type": "text", "text": str(text), "text_elements": []}
+
+
+# ``CodexAppServerRuntime`` methods in the implementation resolve the helper at
+# call time.  Patch the private helper once at import so both turn/start and
+# turn/steer emit the exact generated v2 wire shape.
+_impl._text_input = _official_text_input
 
 
 class CodexAppServerSettings(_impl.CodexAppServerSettings):
@@ -51,7 +69,7 @@ class CodexAppServerSettings(_impl.CodexAppServerSettings):
 
 
 class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
-    """Runtime that makes the ``turn/start``/``turn/steer`` boundary race-safe."""
+    """Race-safe runtime using only fields in the generated App Server schema."""
 
     def __init__(
         self,
@@ -76,6 +94,78 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
         # official wire protocol untouched while allowing an immediately
         # following Discord message to wait for the returned turn ID and steer it.
         self.client.register_turn = register_and_signal  # type: ignore[method-assign]
+
+    def _resume_thread(
+        self,
+        *,
+        thread_id: str,
+        cwd: Path,
+        sandbox: str,
+    ) -> None:
+        """Resume with the current generated ``ThreadResumeParams`` fields."""
+
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "cwd": str(cwd),
+            "approvalPolicy": self.settings.approval_policy,
+            "approvalsReviewer": self.settings.approvals_reviewer,
+            "sandbox": _impl._sandbox_mode(sandbox),
+            "excludeTurns": True,
+        }
+        _impl._put_optional(params, "model", self.settings.model)
+        _impl._put_optional(
+            params,
+            "modelProvider",
+            self.settings.model_provider,
+        )
+        if self.settings.config_overrides:
+            params["config"] = dict(self.settings.config_overrides)
+        self.client.request(
+            "thread/resume",
+            params,
+            timeout=self.settings.request_timeout_seconds,
+        )
+
+    def _start_thread(
+        self,
+        *,
+        cwd: Path,
+        sandbox: str,
+    ) -> str:
+        """Start with the current generated ``ThreadStartParams`` fields."""
+
+        params: dict[str, Any] = {
+            "cwd": str(cwd),
+            "approvalPolicy": self.settings.approval_policy,
+            "approvalsReviewer": self.settings.approvals_reviewer,
+            "sandbox": _impl._sandbox_mode(sandbox),
+            "ephemeral": self.settings.ephemeral,
+            "serviceName": self.settings.service_name,
+        }
+        _impl._put_optional(params, "model", self.settings.model)
+        _impl._put_optional(
+            params,
+            "modelProvider",
+            self.settings.model_provider,
+        )
+        _impl._put_optional(
+            params,
+            "developerInstructions",
+            self.settings.developer_instructions,
+        )
+        if self.settings.config_overrides:
+            params["config"] = dict(self.settings.config_overrides)
+        response = self.client.request(
+            "thread/start",
+            params,
+            timeout=self.settings.request_timeout_seconds,
+        )
+        thread_id = _impl._thread_id(response)
+        if not thread_id:
+            raise _impl.CodexAppServerProtocolError(
+                "thread/start response did not contain thread.id"
+            )
+        return thread_id
 
     def run_turn(
         self,

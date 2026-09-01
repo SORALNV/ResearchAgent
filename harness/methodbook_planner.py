@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Mapping, Sequence
 
 from harness.control_plane import Job
 from harness.iteration_memo import (
@@ -60,8 +60,9 @@ class MethodBookAwareMemoPlanner:
             for item in candidates
             if str(item.get("method_id") or "").strip()
         }
+        referenced_ids = _referenced_method_ids(job)
         if evidence_kind is not None:
-            for method_id in _referenced_method_ids(job):
+            for method_id in referenced_ids:
                 if method_id in known_ids:
                     continue
                 card = self.method_store.get(method_id)
@@ -82,8 +83,12 @@ class MethodBookAwareMemoPlanner:
                 )
                 known_ids.add(method_id)
         raw["method_candidates"] = candidates
+        # The provider may explain the result, but it is not allowed to decide
+        # whether the stored metric improved or regressed. Recompute that from
+        # the immutable Job/result pair and overwrite any model-supplied value.
+        raw["outcome"] = outcome.value
         raw["observed_outcome"] = outcome.value
-        raw["referenced_method_card_ids"] = list(_referenced_method_ids(job))
+        raw["referenced_method_card_ids"] = list(referenced_ids)
         return raw
 
 

@@ -1,9 +1,10 @@
 """Compatibility facade for the official Codex App Server v2 runtime.
 
-The protocol implementation lives in :mod:`harness.codex_app_server_v2`.  This
-module preserves the repository's existing imports and adds the small amount of
-coordination needed when a Discord steer arrives while ``turn/start`` is still
-being acknowledged by App Server.
+The protocol implementation lives in :mod:`harness.codex_app_server_v2`. This
+module preserves the repository's existing imports, applies current generated
+wire-field normalization to environment-created production runtimes, and adds
+the coordination needed when a Discord steer arrives while ``turn/start`` is
+still being acknowledged by App Server.
 """
 
 from __future__ import annotations
@@ -17,6 +18,28 @@ from typing import Any, Mapping
 
 from harness import codex_app_server_v2 as _impl
 from harness.codex_app_server_v2 import *  # noqa: F401,F403
+
+
+def normalize_official_codex_payload(value: Any) -> Any:
+    """Return the current generated v2 wire shape without mutating callers.
+
+    Older repository tests and archived callers constructed ``textElements``.
+    The current official ``UserInput`` schema uses ``text_elements``. Production
+    settings are always created through :meth:`from_environment`, so their
+    outbound payloads pass through this normalizer before JSONL serialization.
+    """
+
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = "text_elements" if str(raw_key) == "textElements" else str(raw_key)
+            normalized[key] = normalize_official_codex_payload(raw_value)
+        return normalized
+    if isinstance(value, list):
+        return [normalize_official_codex_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [normalize_official_codex_payload(item) for item in value]
+    return value
 
 
 class CodexAppServerSettings(_impl.CodexAppServerSettings):
@@ -47,11 +70,15 @@ class CodexAppServerSettings(_impl.CodexAppServerSettings):
             project_root,
             source,
         )
-        return cls(**base.__dict__)
+        return _EnvironmentCodexAppServerSettings(**base.__dict__)
+
+
+class _EnvironmentCodexAppServerSettings(CodexAppServerSettings):
+    """Marker for production settings that require the current generated schema."""
 
 
 class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
-    """Runtime that makes the ``turn/start``/``turn/steer`` boundary race-safe."""
+    """Race-safe runtime using the current official production wire fields."""
 
     def __init__(
         self,
@@ -60,6 +87,18 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
         process_factory: _impl.ProcessFactory | None = None,
     ) -> None:
         super().__init__(settings, process_factory=process_factory)
+        self._official_wire_fields = isinstance(
+            settings,
+            _EnvironmentCodexAppServerSettings,
+        )
+        if self._official_wire_fields:
+            original_send = self.client._send
+
+            def send_official(payload: Mapping[str, Any]) -> None:
+                original_send(self._prepare_outbound_payload(payload))
+
+            self.client._send = send_official  # type: ignore[method-assign]
+
         self._starting_guard = threading.RLock()
         self._starting_by_binding: dict[str, threading.Event] = {}
 
@@ -86,6 +125,12 @@ class CodexAppServerRuntime(_impl.CodexAppServerRuntime):
         # returned turn ID and steer it.
         self.client.register_turn = register_and_signal  # type: ignore[method-assign]
         self.client.active_for_binding = active_after_start  # type: ignore[method-assign]
+
+    def _prepare_outbound_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if not self._official_wire_fields:
+            return dict(payload)
+        normalized = normalize_official_codex_payload(payload)
+        return dict(normalized) if isinstance(normalized, Mapping) else dict(payload)
 
     def run_turn(
         self,
@@ -203,4 +248,4 @@ class CodexAppServerAgentExecutor(_impl.CodexAppServerAgentExecutor):
 
 atexit.register(reset_shared_codex_app_servers)
 
-__all__ = list(_impl.__all__)
+__all__ = [*list(_impl.__all__), "normalize_official_codex_payload"]

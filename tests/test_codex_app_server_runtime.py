@@ -302,7 +302,7 @@ def _run_in_thread(runtime: CodexAppServerRuntime, tmp_path: Path, session_id: s
 
 
 def test_settings_reject_codex_exec_and_require_user_approval_routing(tmp_path: Path):
-    with pytest.raises(ValueError, match="codex exec is disabled"):
+    with pytest.raises(ValueError, match="official.*codex app-server"):
         CodexAppServerSettings.from_environment(
             tmp_path,
             {"CODEX_APP_SERVER_COMMAND": "codex exec --json"},

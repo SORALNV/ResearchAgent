@@ -177,6 +177,26 @@ def test_planning_dialogue_codex_start_command_matches_current_cli(tmp_path):
     assert command[-1] == "-"
 
 
+def test_gpt_56_aliases_use_supported_codex_model_ids():
+    assert effective_model_name("5.6") == "gpt-5.6-sol"
+    assert effective_model_name("GPT5.6") == "gpt-5.6-sol"
+    assert effective_model_name("gpt5.6") == "gpt-5.6-sol"
+    assert effective_model_name("GPT-5.6") == "gpt-5.6-sol"
+    assert effective_model_name("gpt-5.6") == "gpt-5.6-sol"
+    assert effective_model_name("5.6sol") == "gpt-5.6-sol"
+    assert effective_model_name("GPT5.6sol") == "gpt-5.6-sol"
+    assert effective_model_name("gpt5.6sol") == "gpt-5.6-sol"
+    assert effective_model_name("GPT-5.6-sol") == "gpt-5.6-sol"
+    assert effective_model_name("5.6terra") == "gpt-5.6-terra"
+    assert effective_model_name("GPT5.6terra") == "gpt-5.6-terra"
+    assert effective_model_name("gpt5.6terra") == "gpt-5.6-terra"
+    assert effective_model_name("GPT-5.6-terra") == "gpt-5.6-terra"
+    assert effective_model_name("5.6luna") == "gpt-5.6-luna"
+    assert effective_model_name("GPT5.6luna") == "gpt-5.6-luna"
+    assert effective_model_name("gpt5.6luna") == "gpt-5.6-luna"
+    assert effective_model_name("GPT-5.6-luna") == "gpt-5.6-luna"
+
+
 def test_planning_dialogue_resume_command_omits_unsupported_flags(tmp_path):
     config = HarnessConfig(project_root=tmp_path, sub_agent_command="codex")
     runner = PlanningDialogueRunner(config)

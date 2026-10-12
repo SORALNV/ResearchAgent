@@ -317,6 +317,7 @@ RESEARCH_AGENT_MODEL=gpt-5.5
 
 PLAN mode uses `PLAN_AGENT_MODEL` through the configured Codex command. At `/re start`, the harness writes `plan.md`; RESEARCH then uses `RESEARCH_AGENT_MODEL` and receives that plan as handoff context.
 `5.4mini` is accepted as a friendly alias and is passed to Codex CLI as `gpt-5.4-mini`.
+GPT-5.6 aliases are also accepted: `5.6` -> `gpt-5.6-sol`, `5.6sol` -> `gpt-5.6-sol`, `5.6terra` -> `gpt-5.6-terra`, and `5.6luna` -> `gpt-5.6-luna`.
 
 When `SUB_AGENT_COMMAND=codex` is set, only the `sub` role is replaced with a real CLI call. The harness runs:
 

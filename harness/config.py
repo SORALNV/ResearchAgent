@@ -23,6 +23,23 @@ def _bool_env(name: str, default: bool = False) -> bool:
 MODEL_ALIASES = {
     "5.3CodexSpark": "gpt-5.3-codex-spark",
     "5.4mini": "gpt-5.4-mini",
+    "5.6": "gpt-5.6-sol",
+    "GPT5.6": "gpt-5.6-sol",
+    "gpt5.6": "gpt-5.6-sol",
+    "GPT-5.6": "gpt-5.6-sol",
+    "gpt-5.6": "gpt-5.6-sol",
+    "5.6sol": "gpt-5.6-sol",
+    "GPT5.6sol": "gpt-5.6-sol",
+    "gpt5.6sol": "gpt-5.6-sol",
+    "GPT-5.6-sol": "gpt-5.6-sol",
+    "5.6terra": "gpt-5.6-terra",
+    "GPT5.6terra": "gpt-5.6-terra",
+    "gpt5.6terra": "gpt-5.6-terra",
+    "GPT-5.6-terra": "gpt-5.6-terra",
+    "5.6luna": "gpt-5.6-luna",
+    "GPT5.6luna": "gpt-5.6-luna",
+    "gpt5.6luna": "gpt-5.6-luna",
+    "GPT-5.6-luna": "gpt-5.6-luna",
 }
 
 
